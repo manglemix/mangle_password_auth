@@ -1,0 +1,24 @@
+[package]
+name = "mangle_password_auth"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+mangle-db-enums = { path = "../mangle_db_enums" }
+mangle-db-config-parse = { path = "../mangle_db_config_parse" }
+mangle-rust-utils = { path = "../mangle_rust_utils" }
+async-std = { version = "1.11.0", features = ["attributes"] }
+rand = { version = "0.8.5" , features = ["std_rng"] }
+rust-argon2 = "1.0.0"
+toml = "0.5.9"
+tokio = { version = "1.19.2" , features = ["rt", "rt-multi-thread", "macros", "net"]}
+rocket = "0.5.0-rc.2"
+lazy_static = "1.4.0"
+ed25519-dalek = "1.0.1"
+async-trait = "0.1.56"
+base64 = "0.13.0"
+figment = { version = "0.10.6" , features = ["toml"] }
+serde = "1.0.137"
+futures-lite = "1.12.0"

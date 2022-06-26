@@ -1,0 +1,16 @@
+[admin]
+hash = "$argon2id$v=19$m=16,t=2,p=1$NEFBMkd4Q2ZnNGFOaE1JTw$MSVNEMC8FFfLwvjrIgPPew"
+privileges = ["can_create_user"]
+roles = ["admin"]
+
+[lmao]
+hash = "$argon2id$v=19$m=16,t=2,p=1$NEFBMkd4Q2ZnNGFOaE1JTw$MSVNEMC8FFfLwvjrIgPPew"
+roles = ["lmao"]
+
+[manglemix]
+hash = "$argon2i$v=19$m=4096,t=3,p=1$lUCmuM5j7CZq799A/6MsIoph4YGHQ+YRR/Mj0X9L4Z0$EdBXOW4jVMReCrzFG90I2fwBd1rQqSudvMyHkuQnIcA"
+roles = ["player"]
+
+[manglemix2]
+hash = "$argon2i$v=19$m=4096,t=3,p=1$DdL0J1LNT1BbJAkl1A94UPGJxE0HVj61GJ9iSB4C9GM$LQIVtuiAiwS33+m9bUCL9Own1fOX1lo2io0GhhmD3Xs"
+roles = ["player"]
