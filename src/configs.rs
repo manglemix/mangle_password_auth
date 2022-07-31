@@ -1,13 +1,11 @@
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
-use figment::{Figment, providers::Toml};
-use figment::providers::Format;
-use serde::Deserialize;
+use simple_serde::{prelude::*, toml_prelude::*};
 
 use crate::mangle_rust_utils::Colorize;
 
-
-#[derive(Deserialize)]
 pub struct Configs {
 	pub suffix: String,
 	pub mount_point: String,
@@ -22,24 +20,39 @@ pub struct Configs {
 }
 
 
-pub fn read_config_file<T: AsRef<Path>>(path: T) -> Configs {
-	match Figment::new()
-		.join(Toml::file(path))
-		.merge(("mount_point", "/"))
-		.merge(("log_path", "errors.log"))
-		.merge(("users_path", "users"))
-		.merge(("used_challenges_path", "used_challenges"))
-		.merge(("max_session_duration", 1800))
-		.merge(("max_pipe_idle_duration", 1800))
-		.merge(("login_timeout", 600))
-		.merge(("max_fails", 3))
-		.merge(("roles_path", "roles"))
-		.extract()
-	{
-		Ok(x) => x,
-		Err(e) => {
-			error!("Error in config file:\n\t{e}");
-			bad_exit!();
-		}
+impl Deserialize<ReadableProfile> for Configs {
+	fn deserialize<T: Serializer>(data: &mut T) -> Result<Self, DeserializationError> {
+		Ok(Self {
+			suffix: data.deserialize_key("suffix")?,
+			mount_point: data.deserialize_key_or("mount_point", "/")?,
+			log_path: data.deserialize_key_or("log_path", "errors.log")?,
+			roles_path: data.deserialize_key_or("roles_path", "roles")?,
+			users_path: data.deserialize_key_or("users_path", "users")?,
+			used_challenges_path: data.deserialize_key_or("used_challenges_path", "used_challenges")?,
+			max_session_duration: data.deserialize_key_or("max_session_duration", 1800u64)?,
+			max_pipe_idle_duration: data.deserialize_key_or("max_pipe_idle_duration", 1800u64)?,
+			login_timeout: data.deserialize_key_or("login_timeout", 600u64)?,
+			max_fails: data.deserialize_key_or("max_fails", 3u8)?,
+		})
 	}
 }
+
+impl_toml_deser!(Configs, ReadableProfile);
+
+
+pub fn read_config_file<T: AsRef<Path>>(path: T) -> Configs {
+	let mut file = unwrap_result_or_default_error!(
+		File::open(path),
+		"opening config file"
+	);
+	let mut data = String::new();
+	unwrap_result_or_default_error!(
+		file.read_to_string(&mut data),
+		"reading config file"
+	);
+	unwrap_result_or_default_error!(
+		Configs::deserialize_toml(data),
+		"parsing config file"
+	)
+}
+

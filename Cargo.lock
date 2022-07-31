@@ -996,7 +996,6 @@ dependencies = [
  "async-trait",
  "base64",
  "ed25519-dalek",
- "figment",
  "futures-lite",
  "lazy_static",
  "mangle-db-config-parse",
@@ -1005,7 +1004,7 @@ dependencies = [
  "rand 0.8.5",
  "rocket",
  "rust-argon2",
- "serde",
+ "simple-serde",
  "tokio",
  "toml",
 ]
@@ -1579,6 +1578,10 @@ name = "signature"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f054c6c1a6e95179d6f23ed974060dcefb2d9388bb7256900badad682c499de4"
+
+[[package]]
+name = "simple-serde"
+version = "0.1.0"
 
 [[package]]
 name = "slab"

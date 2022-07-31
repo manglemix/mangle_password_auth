@@ -1,9 +1,9 @@
 #![feature(proc_macro_hygiene, decl_macro)]
 
 #[macro_use]
-extern crate rocket;
-#[macro_use]
 extern crate mangle_rust_utils;
+#[macro_use]
+extern crate rocket;
 
 use std::fs::File;
 use std::io::{Error as IOError, ErrorKind, Read};
@@ -15,7 +15,7 @@ use ed25519_dalek::Signature;
 use lazy_static::lazy_static;
 use mangle_db_config_parse::ask_config_filename;
 use mangle_db_enums::{GatewayRequestHeader, GatewayResponseHeader};
-use mangle_rust_utils::{setup_logger_file};
+use mangle_rust_utils::setup_logger_file;
 use rocket::fairing::AdHoc;
 use rocket::http::Status;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -98,19 +98,19 @@ macro_rules! parse_header {
 #[get("/<path..>")]
 async fn borrow_resource(bipipe: MutexBiPipe, path: PathBuf) -> Result<String, Status> {
 	let mut socket = bipipe.lock().await;
-	
+
 	let mut payload = vec![GatewayRequestHeader::BorrowResource.into()];
 	payload.append(&mut path.to_str().unwrap().as_bytes().to_vec());
-	
+
 	write_socket!(socket, payload.as_slice());
-	
+
 	let mut buffer = read_socket!(socket);
-	
+
 	match parse_header!(buffer) {
 		GatewayResponseHeader::Ok => {}
 		_ => return Err(Status::NotFound),
 	}
-	
+
 	String::from_utf8(buffer).map_err(|e| {
 		log_default_error!(e, "deserializing resource");
 		Status::InternalServerError
@@ -119,23 +119,23 @@ async fn borrow_resource(bipipe: MutexBiPipe, path: PathBuf) -> Result<String, S
 
 
 #[put("/<path..>", data = "<data>")]
-async fn replace_resource(bipipe: MutexBiPipe, path: PathBuf, data: String) -> Result<&'static str, Status> {
+async fn put_resource(bipipe: MutexBiPipe, path: PathBuf, data: String) -> Result<&'static str, Status> {
 	let mut socket = bipipe.lock().await;
-	
+
 	let mut payload = vec![GatewayRequestHeader::WriteResource.into()];
 	let path_str = path.to_str().unwrap();
 	payload.append(&mut (path_str.len() as u32).to_be_bytes().to_vec());
 	payload.append(&mut (String::from(path_str) + data.as_str()).as_bytes().to_vec());
-	
+
 	write_socket!(socket, payload.as_slice());
-	
+
 	let mut buffer = read_socket!(socket);
-	
+
 	match parse_header!(buffer) {
 		GatewayResponseHeader::Ok => {}
 		_ => return Err(Status::NotFound),
 	}
-	
+
 	Ok("put success")
 }
 
@@ -145,7 +145,7 @@ async fn get_session_with_password(username: String, password: String) -> Result
 	if AUTH_STATE.is_user_locked_out(&username).await {
 		return Err(Status::TooManyRequests)
 	}
-	
+
 	match AUTH_STATE.is_valid_password(&username, &password).await {
 		Ok(x) => if !x {
 			AUTH_STATE.increment_failed_login(&username).await;
@@ -156,7 +156,7 @@ async fn get_session_with_password(username: String, password: String) -> Result
 			return Err(Status::InternalServerError)
 		}
 	}
-	
+
 	Ok(AUTH_STATE.get_session_id(&username).await.deref().clone())
 }
 
@@ -166,22 +166,22 @@ async fn get_session_with_key(username: String, challenge: String, signature: St
 	if AUTH_STATE.is_user_locked_out(&username).await {
 		return Err(Status::TooManyRequests)
 	}
-	
+
 	let bytes = match base64::decode_config(signature.clone(), base64::URL_SAFE_NO_PAD) {
 		Ok(x) => x,
 		Err(_) => return Err(Status::BadRequest)
 	};
-	
+
 	let signature = match Signature::from_bytes(bytes.as_slice()) {
 		Ok(x) => x,
 		Err(_) => return Err(Status::BadRequest)
 	};
-	
+
 	if !AUTH_STATE.is_valid_key(&username, challenge, signature).await {
 		AUTH_STATE.lockout_user(&username).await;
 		return Err(Status::Unauthorized);
 	}
-	
+
 	Ok(AUTH_STATE.get_session_id(&username).await.deref().clone())
 }
 
@@ -206,48 +206,48 @@ async fn make_user(_can_create: CanCreateUser, username: String, password: Strin
 #[tokio::main]
 async fn main() {
 	let config_path = ask_config_filename("Mangle Password Auth", "auth_config");
-	
+
 	info!("Using {} as a config file", config_path);
 	let configs = read_config_file(config_path);
-	
+
 	let mut users_file = unwrap_result_or_default_error!(
 		File::open(&configs.users_path),
 		"opening users file"
 	);
-	
+
 	let mut userdata = String::new();
 	unwrap_result_or_default_error!(
 		users_file.read_to_string(&mut userdata),
 		"reading users file"
 	);
 	drop(users_file);
-	
+
 	let mut used_challenges_file = unwrap_result_or_default_error!(
 		File::open(&configs.used_challenges_path),
 		"opening used_challenges file"
 	);
-	
+
 	let mut used_challenges = String::new();
 	unwrap_result_or_default_error!(
 		used_challenges_file.read_to_string(&mut used_challenges),
 		"reading used_challenges file"
 	);
 	drop(used_challenges_file);
-	
+
 	let mut roles_file = unwrap_result_or_default_error!(
 		File::open(&configs.roles_path),
 		"opening roles file"
 	);
-	
+
 	let mut roles = String::new();
 	unwrap_result_or_default_error!(
 		roles_file.read_to_string(&mut roles),
 		"reading roles file"
 	);
 	drop(roles_file);
-	
+
 	// info!("Binding to {bind_addr} on {}", &configs.mount_point);
-	
+
 	AUTH_STATE.populate(
 		userdata,
 		used_challenges,
@@ -258,13 +258,13 @@ async fn main() {
 		configs.max_pipe_idle_duration,
 		configs.max_session_duration
 	).await;
-	
+
 	setup_logger_file(configs.log_path);
-	
+
 	info!("Listener spinning up!");
-	
+
 	let (ready_tx, ready_rx) = async_std::channel::unbounded::<()>();
-	
+
 	select! {
 		// server
 		res = rocket::build()
@@ -272,7 +272,7 @@ async fn main() {
 				get_session_with_password,
 				get_session_with_key,
 				borrow_resource,
-				replace_resource,
+				put_resource,
 				make_user
 			])
 			.attach(AdHoc::on_liftoff("notify_liftoff", |_| Box::pin(async move {
@@ -327,11 +327,12 @@ async fn main() {
 				}
 			};
 		} => {},
-	};
-	
+	}
+	;
+
 	warn!("Exiting...");
 	log_info!("Listener exiting!");
-	
+
 	unwrap_result_or_default_error!(
 		AUTH_STATE.write_userdata(
 			&mut unwrap_result_or_default_error!(
@@ -341,7 +342,7 @@ async fn main() {
 		).await,
 		"writing to users file"
 	);
-	
+
 	unwrap_result_or_default_error!(
 		AUTH_STATE.write_used_challenges(
 			&mut unwrap_result_or_default_error!(
@@ -351,7 +352,7 @@ async fn main() {
 		).await,
 		"writing to users file"
 	);
-	
+
 	warn!("Exit Successful!");
 	log_info!("Listener exited!");
 }
