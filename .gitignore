@@ -2,3 +2,7 @@
 /mangle_password_auth.iml
 
 .idea/
+
+errors.log
+
+users

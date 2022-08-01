@@ -6,6 +6,7 @@ use simple_serde::{prelude::*, toml_prelude::*};
 
 use crate::mangle_rust_utils::Colorize;
 
+
 pub struct Configs {
 	pub suffix: String,
 	pub mount_point: String,
@@ -16,7 +17,6 @@ pub struct Configs {
 	pub max_pipe_idle_duration: u64,
 	pub login_timeout: u64,
 	pub max_fails: u8,
-	pub roles_path: String
 }
 
 
@@ -26,7 +26,6 @@ impl Deserialize<ReadableProfile> for Configs {
 			suffix: data.deserialize_key("suffix")?,
 			mount_point: data.deserialize_key_or("mount_point", "/")?,
 			log_path: data.deserialize_key_or("log_path", "errors.log")?,
-			roles_path: data.deserialize_key_or("roles_path", "roles")?,
 			users_path: data.deserialize_key_or("users_path", "users")?,
 			used_challenges_path: data.deserialize_key_or("used_challenges_path", "used_challenges")?,
 			max_session_duration: data.deserialize_key_or("max_session_duration", 1800u64)?,

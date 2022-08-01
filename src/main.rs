@@ -1,41 +1,80 @@
 #![feature(proc_macro_hygiene, decl_macro)]
 
 #[macro_use]
-extern crate mangle_rust_utils;
-#[macro_use]
 extern crate rocket;
+#[macro_use]
+extern crate mangle_rust_utils;
 
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
+use std::hint::unreachable_unchecked;
 use std::io::{Error as IOError, ErrorKind, Read};
-use std::ops::Deref;
+use std::ops::{Add, Deref};
 use std::path::PathBuf;
+use std::str::FromStr;
+use std::time::SystemTime;
 
 use async_std::io::{self, WriteExt};
-use ed25519_dalek::Signature;
-use lazy_static::lazy_static;
 use mangle_db_config_parse::ask_config_filename;
 use mangle_db_enums::{GatewayRequestHeader, GatewayResponseHeader};
 use mangle_rust_utils::setup_logger_file;
+use rocket::Either;
 use rocket::fairing::AdHoc;
-use rocket::http::Status;
+use rocket::http::{ContentType, Cookie, CookieJar, Status};
+use rocket::time::OffsetDateTime;
+use simple_serde::PrimitiveSerializer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::select;
 
-use crate::auth_state::{AddUserError, AuthState};
+use crate::singletons::{CredentialChallenge, LoginResult, Logins, Pipes, Sessions, SpecialUsers, UserCreationError, SessionID};
 use crate::configs::read_config_file;
-use crate::guards::{CanCreateUser, MutexBiPipe};
 use crate::mangle_rust_utils::Colorize;
 
-mod auth_state;
+mod singletons;
 mod configs;
-mod guards;
+mod parsing;
+
+use crate::parsing::{UsedChallenges, UserCredentialData};
 
 const MANGLE_DB_CLOSED: &str = "MangleDB has closed the connections";
 
 
-lazy_static! {
-	static ref AUTH_STATE: AuthState = AuthState::new();
+struct OptimizedOption<T>(Option<T>);
+
+
+impl<T> OptimizedOption<T> {
+	const fn empty() -> Self {
+		Self(None)
+	}
+
+	fn new(value: T) -> Self {
+		Self(Some(value))
+	}
+
+	fn write(&mut self, value: T) {
+		self.0 = Some(value);
+	}
 }
+
+
+impl<T> Deref for OptimizedOption<T> {
+	type Target = T;
+
+	fn deref(&self) -> &Self::Target {
+		unsafe {
+			match &self.0 {
+				None => unreachable_unchecked(),
+				Some(x) => x
+			}
+		}
+	}
+}
+
+
+static mut LOGINS: OptimizedOption<Logins> = OptimizedOption::empty();
+static mut PIPES: OptimizedOption<Pipes> = OptimizedOption::empty();
+static mut SESSIONS: OptimizedOption<Sessions> = OptimizedOption::empty();
+static mut SPECIALS: OptimizedOption<SpecialUsers> = OptimizedOption::empty();
 
 
 macro_rules! write_socket {
@@ -48,10 +87,21 @@ macro_rules! write_socket {
 			} else {
 				log_default_error!(e, "reading from local socket");
 			}
-			return Err(Status::InternalServerError);
+			return make_response!(ServerError, DB_CONNECTION);
 		}
-	}
-	};
+	}};
+    ($socket: expr, $payload: expr, either) => {
+		match $socket.write_all($payload).await {
+		Ok(_) => {}
+		Err(e) => {
+			if e.kind() == ErrorKind::BrokenPipe {
+				log_error!("{}", MANGLE_DB_CLOSED);
+			} else {
+				log_default_error!(e, "reading from local socket");
+			}
+			return make_response!(ServerError, Either::Left(DB_CONNECTION));
+		}
+	}};
 }
 
 
@@ -61,7 +111,7 @@ macro_rules! read_socket {
 		match $socket.read(buffer.as_mut_slice()).await {
 			Ok(0) => {
 				log_error!("{}", MANGLE_DB_CLOSED);
-				return Err(Status::InternalServerError);
+				return make_response!(ServerError, DB_CONNECTION);
 			}
 			Ok(n) => buffer = buffer[0..n].to_vec(),
 			Err(e) => {
@@ -70,57 +120,194 @@ macro_rules! read_socket {
 				} else {
 					log_default_error!(e, "reading from local socket");
 				}
-				return Err(Status::InternalServerError);
+				return make_response!(ServerError, DB_CONNECTION);
 			}
 		}
 		buffer
 	}};
 	($socket: expr) => {
 		read_socket!($socket, 128)
-	}
+	};
+	($socket: expr, either) => {
+		read_socket!($socket, 128, either)
+	};
+    ($socket: expr, $buffer_size: literal, either) => {{
+		let mut buffer = vec![0; $buffer_size];
+		match $socket.read(buffer.as_mut_slice()).await {
+			Ok(0) => {
+				log_error!("{}", MANGLE_DB_CLOSED);
+				return make_response!(ServerError, Either::Left(DB_CONNECTION));
+			}
+			Ok(n) => buffer = buffer[0..n].to_vec(),
+			Err(e) => {
+				if e.kind() == ErrorKind::BrokenPipe {
+					log_error!("{}", MANGLE_DB_CLOSED);
+				} else {
+					log_default_error!(e, "reading from local socket");
+				}
+				return make_response!(ServerError, Either::Left(DB_CONNECTION));
+			}
+		}
+		buffer
+	}};
+}
+
+
+const BUG_MESSAGE: &str = "We encountered a bug on our end. Please try again later";
+const DB_CONNECTION: &str = "We had difficulties connecting to our database. Please try again later";
+
+
+macro_rules! make_response {
+	(ServerError, $reason: expr) => {
+		make_response!(Status::InternalServerError, $reason)
+	};
+	(NotFound, $reason: expr) => {
+		make_response!(Status::NotFound, $reason)
+	};
+	(BadRequest, $reason: expr) => {
+		make_response!(Status::BadRequest, $reason)
+	};
+	(Ok, $reason: expr) => {
+		make_response!(Status::Ok, $reason)
+	};
+	(BUG) => {
+		make_response!(NotFound, BUG_MESSAGE)
+	};
+    ($code: expr, $reason: expr) => {
+		($code, $reason)
+	};
 }
 
 
 macro_rules! parse_header {
     ($buffer: expr) => {{
-		let header = $buffer.remove(0);
+		let header = match $buffer.remove(0) {
+			Some(x) => x,
+			None => {
+				log_error!("Empty response from db");
+				return make_response!(ServerError, BUG_MESSAGE);
+			}
+		};
 		match TryInto::<GatewayResponseHeader>::try_into(header) {
 			Ok(x) => x,
 			Err(_) => {
 				log_error!("Unrecognised header {header}");
-				return Err(Status::InternalServerError);
+				return make_response!(ServerError, BUG_MESSAGE);
+			}
+		}
+	}};
+    ($buffer: expr, either) => {{
+		let header = match $buffer.remove(0) {
+			Some(x) => x,
+			None => {
+				log_error!("Empty response from db");
+				return make_response!(ServerError, Either::Left(BUG_MESSAGE));
+			}
+		};
+		match TryInto::<GatewayResponseHeader>::try_into(header) {
+			Ok(x) => x,
+			Err(_) => {
+				log_error!("Unrecognised header {header}");
+				return make_response!(ServerError, Either::Left(BUG_MESSAGE));
 			}
 		}
 	}};
 }
 
 
+const SESSION_COOKIE_NAME: &str = "Session-ID";
+
+
+macro_rules! check_session_id {
+    ($cookies: expr) => {
+		if let Some(cookie) = $cookies.get(SESSION_COOKIE_NAME) {
+			let session_id = match SessionID::try_from(cookie.value().to_string()) {
+				Ok(x) => x,
+				Err(_) => return make_response!(BadRequest, "The Session-ID is malformed")
+			};
+			if !unsafe { SESSIONS.is_valid_session(&session_id) }.await {
+				return make_response!(Status::Unauthorized, "The Session-ID is invalid or expired")
+			}
+			session_id
+		} else {
+			return make_response!(BadRequest, "Missing Session-ID header")
+		}
+	};
+    ($cookies: expr, either) => {
+		if let Some(cookie) = $cookies.get(SESSION_COOKIE_NAME) {
+			let session_id = match SessionID::try_from(cookie.value().to_string()) {
+				Ok(x) => x,
+				Err(_) => return make_response!(BadRequest, Either::Left("The Session-ID is malformed"))
+			};
+			if !unsafe { SESSIONS.is_valid_session(&session_id) }.await {
+				return make_response!(Status::Unauthorized, Either::Left("The Session-ID is invalid or expired"))
+			}
+			session_id
+		} else {
+			return make_response!(BadRequest, Either::Left(("Missing Session-ID header")))
+		}
+	};
+}
+
+type Response = (Status, &'static str);
+
+
 #[get("/<path..>")]
-async fn borrow_resource(bipipe: MutexBiPipe, path: PathBuf) -> Result<String, Status> {
-	let mut socket = bipipe.lock().await;
+async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>) -> (Status, Either<&'static str, (ContentType, Vec<u8>)>) {
+	check_session_id!(cookies, either);
+
+	let mut socket = match unsafe { PIPES.take_pipe() }.await {
+		Ok(x) => x,
+		Err(e) => {
+			log_default_error!(e, "connecting to db");
+			return make_response!(ServerError, Either::Left(DB_CONNECTION))
+		}
+	};
 
 	let mut payload = vec![GatewayRequestHeader::BorrowResource.into()];
 	payload.append(&mut path.to_str().unwrap().as_bytes().to_vec());
 
-	write_socket!(socket, payload.as_slice());
+	write_socket!(socket, payload.as_slice(), either);
 
-	let mut buffer = read_socket!(socket);
+	let mut buffer: VecDeque<_> = read_socket!(socket, either).into();
 
-	match parse_header!(buffer) {
+	match parse_header!(buffer, either) {
 		GatewayResponseHeader::Ok => {}
-		_ => return Err(Status::NotFound),
+		GatewayResponseHeader::InternalError => return make_response!(NotFound, Either::Left(BUG_MESSAGE)),
+		_ => return make_response!(NotFound, Either::Left("The requested resource could not be found")),
 	}
 
-	String::from_utf8(buffer).map_err(|e| {
-		log_default_error!(e, "deserializing resource");
-		Status::InternalServerError
-	})
+	let mime_type = match buffer.deserialize_string() {
+		Ok(x) => x,
+		Err(e) => {
+			log_default_error!(e, "parsing mime type from db response");
+			return make_response!(ServerError, Either::Left(BUG_MESSAGE))
+		}
+	};
+
+	(Status::Ok, Either::Right((
+		match ContentType::parse_flexible(mime_type.as_str()) {
+			Some(x) => x,
+			None => {
+				log_error!("Mime type from db is not valid: {}", mime_type);
+				return make_response!(ServerError, Either::Left(BUG_MESSAGE))
+			}
+		},
+		Into::<Vec<_>>::into(buffer)
+	)))
 }
 
 
 #[put("/<path..>", data = "<data>")]
-async fn put_resource(bipipe: MutexBiPipe, path: PathBuf, data: String) -> Result<&'static str, Status> {
-	let mut socket = bipipe.lock().await;
+async fn put_resource(path: PathBuf, data: String, cookies: &CookieJar<'_>) -> Response {
+	check_session_id!(cookies);
+	let mut socket = match unsafe { PIPES.take_pipe() }.await {
+		Ok(x) => x,
+		Err(e) => {
+			log_default_error!(e, "connecting to db");
+			return make_response!(ServerError, DB_CONNECTION)
+		}
+	};
 
 	let mut payload = vec![GatewayRequestHeader::WriteResource.into()];
 	let path_str = path.to_str().unwrap();
@@ -129,75 +316,86 @@ async fn put_resource(bipipe: MutexBiPipe, path: PathBuf, data: String) -> Resul
 
 	write_socket!(socket, payload.as_slice());
 
-	let mut buffer = read_socket!(socket);
+	let mut buffer: VecDeque<_> = read_socket!(socket).into();
 
 	match parse_header!(buffer) {
-		GatewayResponseHeader::Ok => {}
-		_ => return Err(Status::NotFound),
+		GatewayResponseHeader::Ok => make_response!(Ok, "Resource put successfully"),
+		GatewayResponseHeader::InternalError => make_response!(BUG),
+		_ => make_response!(NotFound, "The given path could not be found"),
 	}
-
-	Ok("put success")
 }
 
 
 #[get("/users_with_password?<username>&<password>")]
-async fn get_session_with_password(username: String, password: String) -> Result<String, Status> {
-	if AUTH_STATE.is_user_locked_out(&username).await {
-		return Err(Status::TooManyRequests)
-	}
-
-	match AUTH_STATE.is_valid_password(&username, &password).await {
-		Ok(x) => if !x {
-			AUTH_STATE.increment_failed_login(&username).await;
-			return Err(Status::Unauthorized)
+async fn get_session_with_password(username: String, password: String, cookies: &CookieJar<'_>) -> Response {
+	match unsafe { LOGINS.try_login(&username, CredentialChallenge::Password(password)) }.await {
+		LoginResult::Ok => {
+			let session_id = unsafe { SESSIONS.create_session(username) }.await;
+			cookies.add(
+				Cookie::build(SESSION_COOKIE_NAME, session_id.to_string())
+					.expires(OffsetDateTime::from(SystemTime::now().add(unsafe { SESSIONS.max_session_duration }.clone())))
+					.secure(true)
+					.finish()
+			);
+			make_response!(Ok, "Authentication Successful")
 		}
-		Err(e) => {
-			log_default_error!(e, "validating password for {username}:{password}");
-			return Err(Status::InternalServerError)
-		}
+		LoginResult::BadCredentialChallenge => make_response!(Status::Unauthorized, "The given password is incorrect"),
+		LoginResult::NonexistentUser => make_response!(Status::Unauthorized, "The given username does not exist"),
+		LoginResult::LockedOut => make_response!(Status::Unauthorized, "You have failed to login too many times"),
+		LoginResult::UnexpectedCredentials => make_response!(Status::BadRequest, "The user does not support password authentication"),
+		_ => unreachable!()
 	}
-
-	Ok(AUTH_STATE.get_session_id(&username).await.deref().clone())
 }
 
 
-#[get("/users_with_key?<username>&<challenge>&<signature>")]
-async fn get_session_with_key(username: String, challenge: String, signature: String) -> Result<String, Status> {
-	if AUTH_STATE.is_user_locked_out(&username).await {
-		return Err(Status::TooManyRequests)
-	}
-
-	let bytes = match base64::decode_config(signature.clone(), base64::URL_SAFE_NO_PAD) {
+#[get("/users_with_key?<username>&<message>&<signature>")]
+async fn get_session_with_key(username: String, message: String, signature: String, cookies: &CookieJar<'_>) -> Response {
+	let signature = match signature.parse() {
 		Ok(x) => x,
-		Err(_) => return Err(Status::BadRequest)
+		Err(_) => return make_response!(BadRequest, "Invalid signature")
 	};
-
-	let signature = match Signature::from_bytes(bytes.as_slice()) {
-		Ok(x) => x,
-		Err(_) => return Err(Status::BadRequest)
-	};
-
-	if !AUTH_STATE.is_valid_key(&username, challenge, signature).await {
-		AUTH_STATE.lockout_user(&username).await;
-		return Err(Status::Unauthorized);
+	match unsafe { LOGINS.try_login(&username, CredentialChallenge::Signature{ message, signature }) }.await {
+		LoginResult::Ok => {
+			let session_id = unsafe { SESSIONS.create_session(username) }.await;
+			cookies.add(
+				Cookie::build(SESSION_COOKIE_NAME, session_id.to_string())
+					.expires(OffsetDateTime::from(SystemTime::now().add(unsafe { SESSIONS.max_session_duration }.clone())))
+					.secure(true)
+					.finish()
+			);
+			make_response!(Ok, "Authentication Successful")
+		}
+		LoginResult::BadCredentialChallenge => make_response!(Status::Unauthorized, "The given signature is incorrect"),
+		LoginResult::NonexistentUser => make_response!(Status::Unauthorized, "The given username does not exist"),
+		LoginResult::LockedOut => make_response!(Status::Unauthorized, "You have failed to login too many times"),
+		LoginResult::UsedChallenge => make_response!(Status::Unauthorized, "The given challenge has been used before"),
+		LoginResult::UnexpectedCredentials => make_response!(Status::BadRequest, "The user does not support key based authentication")
 	}
-
-	Ok(AUTH_STATE.get_session_id(&username).await.deref().clone())
 }
 
 
 #[put("/create_user_with_password?<username>&<password>")]
-async fn make_user(_can_create: CanCreateUser, username: String, password: String) -> Result<&'static str, Status> {
-	match AUTH_STATE.add_user(username, password, vec![String::from("player")]).await {
-		Ok(()) => Ok("user added successfully"),
-		Err(e) => {
-			match e {
-				AddUserError::HashError(e) => log_default_error!(e, "generating password hash"),
-				AddUserError::NonexistentRole(role) => log_error!("Tried to create user with nonexistent role: {role}"),
-				AddUserError::UserExists => return Ok("username is already used"),
-				AddUserError::BadName => return Ok("bad username")
-			}
-			Err(Status::InternalServerError)
+async fn make_user(username: String, password: String, cookies: &CookieJar<'_>) -> Response {
+	let session_id = check_session_id!(cookies);
+	match unsafe { SESSIONS.get_session_owner(&session_id) }.await {
+		Some(creator) => if !unsafe { SPECIALS.can_user_create_user(&creator) } {
+			return make_response!(Status::Unauthorized, "You are not authorized to create users")
+		}
+		None => {
+			log_error!("Session-ID was valid but not associated with a user!");
+			return make_response!(BUG)
+		}
+	}
+
+	match unsafe { LOGINS.add_user(username, password) }.await {
+		Ok(()) => make_response!(Ok, "User created successfully"),
+		Err(e) => match e {
+			UserCreationError::ArgonError(e) => {
+				log_default_error!(e, "generating password hash");
+				make_response!(BUG)
+			},
+			UserCreationError::UsernameInUse => make_response!(BadRequest, "Username already in use"),
+			UserCreationError::BadPassword => make_response!(BadRequest, "Password is not strong enough"),
 		}
 	}
 }
@@ -206,7 +404,6 @@ async fn make_user(_can_create: CanCreateUser, username: String, password: Strin
 #[tokio::main]
 async fn main() {
 	let config_path = ask_config_filename("Mangle Password Auth", "auth_config");
-
 	info!("Using {} as a config file", config_path);
 	let configs = read_config_file(config_path);
 
@@ -234,30 +431,17 @@ async fn main() {
 	);
 	drop(used_challenges_file);
 
-	let mut roles_file = unwrap_result_or_default_error!(
-		File::open(&configs.roles_path),
-		"opening roles file"
+	let used_challenges = UsedChallenges::from_str(used_challenges.as_str()).unwrap().0;
+	let userdata: HashMap<String, UserCredentialData> = unwrap_result_or_default_error!(
+		simple_serde::toml::TOMLDeserialize::deserialize_toml(userdata),
+		"parsing users file"
 	);
 
-	let mut roles = String::new();
-	unwrap_result_or_default_error!(
-		roles_file.read_to_string(&mut roles),
-		"reading roles file"
-	);
-	drop(roles_file);
+	// unsafe {
+	// 	LOGINS.write(Logins::new())
+	// }
 
 	// info!("Binding to {bind_addr} on {}", &configs.mount_point);
-
-	AUTH_STATE.populate(
-		userdata,
-		used_challenges,
-		String::from("mangleDB_") + configs.suffix.as_str(),
-		roles,
-		configs.login_timeout,
-		configs.max_fails,
-		configs.max_pipe_idle_duration,
-		configs.max_session_duration
-	).await;
 
 	setup_logger_file(configs.log_path);
 
@@ -327,31 +511,7 @@ async fn main() {
 				}
 			};
 		} => {},
-	}
-	;
-
-	warn!("Exiting...");
-	log_info!("Listener exiting!");
-
-	unwrap_result_or_default_error!(
-		AUTH_STATE.write_userdata(
-			&mut unwrap_result_or_default_error!(
-				File::create(configs.users_path),
-				"opening users file"
-			)
-		).await,
-		"writing to users file"
-	);
-
-	unwrap_result_or_default_error!(
-		AUTH_STATE.write_used_challenges(
-			&mut unwrap_result_or_default_error!(
-				File::create(configs.used_challenges_path),
-				"opening used_challenges file"
-			)
-		).await,
-		"writing to users file"
-	);
+	};
 
 	warn!("Exit Successful!");
 	log_info!("Listener exited!");

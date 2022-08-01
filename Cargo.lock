@@ -997,7 +997,6 @@ dependencies = [
  "base64",
  "ed25519-dalek",
  "futures-lite",
- "lazy_static",
  "mangle-db-config-parse",
  "mangle-db-enums",
  "mangle-rust-utils",
@@ -1006,7 +1005,6 @@ dependencies = [
  "rust-argon2",
  "simple-serde",
  "tokio",
- "toml",
 ]
 
 [[package]]
