@@ -6,7 +6,6 @@ use simple_serde::{prelude::*, toml_prelude::*};
 
 use crate::mangle_rust_utils::Colorize;
 
-
 pub struct Configs {
 	pub suffix: String,
 	pub mount_point: String,

@@ -1,9 +1,10 @@
 use std::collections::HashSet;
-use simple_serde::{DeserializationError, DeserializationErrorKind, Deserialize, ReadableProfile, Serialize, Serializer};
-use crate::singletons::Privilege;
-use std::str::FromStr;
 use std::convert::Infallible;
+use std::str::FromStr;
 
+use simple_serde::{DeserializationError, DeserializationErrorKind, Deserialize, ReadableProfile, Serialize, Serializer};
+
+use crate::singletons::Privilege;
 
 impl Serialize<ReadableProfile> for Privilege {
 	fn serialize<T: Serializer>(self, data: &mut T) {

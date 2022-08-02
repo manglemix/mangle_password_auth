@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::mem::replace;
-use std::ops::{DerefMut};
+use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,9 @@ use ed25519_dalek::{PublicKey, Signature};
 use mangle_db_enums::MANGLE_DB_SUFFIX;
 use rand::{CryptoRng, Rng, RngCore, thread_rng};
 use rand::distributions::Alphanumeric;
+
+#[cfg(windows)]
+use windows::*;
 
 use crate::*;
 use crate::mangle_rust_utils::Colorize;
@@ -21,8 +24,10 @@ type ArcString = Arc<String>;
 mod windows {
 	use std::pin::Pin;
 	use std::task::{Context, Poll};
+
 	use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 	use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+
 	use super::IOError;
 
 	pub struct BiPipe(NamedPipeClient);
@@ -54,9 +59,6 @@ mod windows {
 		}
 	}
 }
-#[cfg(windows)]
-use windows::*;
-
 
 pub enum Credential {
 	PasswordHash(String),
@@ -231,7 +233,6 @@ impl<'a> Logins<'a> {
 					}
 
 					LoginResult::Ok
-
 				} else {
 					let mut writer = self.failed_logins.write().await;
 
@@ -259,22 +260,20 @@ impl<'a> Logins<'a> {
 		match reader.get(username) {
 			Some(Credential::PasswordHash(_)) => LoginResult::UnexpectedCredentials,
 			Some(Credential::Key(key)) => {
-					if !challenge.starts_with(&self.key_challenge_prefix) {
-						return LoginResult::BadCredentialChallenge
-					}
-
-					let mut used_challenges = self.used_challenges.lock().await;
-					if used_challenges.contains(&challenge) {
-						LoginResult::UsedChallenge
-
-					} else if key.verify_strict(challenge.as_bytes(), &signature).is_ok() {
-						used_challenges.insert(challenge);
-						LoginResult::Ok
-
-					} else {
-						LoginResult::BadCredentialChallenge
-					}
+				if !challenge.starts_with(&self.key_challenge_prefix) {
+					return LoginResult::BadCredentialChallenge
 				}
+
+				let mut used_challenges = self.used_challenges.lock().await;
+				if used_challenges.contains(&challenge) {
+					LoginResult::UsedChallenge
+				} else if key.verify_strict(challenge.as_bytes(), &signature).is_ok() {
+					used_challenges.insert(challenge);
+					LoginResult::Ok
+				} else {
+					LoginResult::BadCredentialChallenge
+				}
+			}
 			None => LoginResult::NonexistentUser
 		}
 	}

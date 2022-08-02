@@ -1,10 +1,9 @@
-use std::ops::Deref;
-use std::sync::Arc;
-
 use async_std::sync::Mutex;
 use rocket::http::Status;
 use rocket::Request;
 use rocket::request::{FromRequest, Outcome};
+use std::ops::Deref;
+use std::sync::Arc;
 
 use crate::auth_state::Privilege;
 use crate::SESSIONS;
@@ -19,7 +18,7 @@ impl<'r> FromRequest<'r> for AuthorizedUser {
 	async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
 		let mut iter = request.headers().get("Session-ID");
 		let session_id = match iter.next() {
-			Some(x) =>  String::from(x),
+			Some(x) => String::from(x),
 			None => return Outcome::Failure((Status::BadRequest, ()))
 		};
 

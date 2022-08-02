@@ -1,12 +1,12 @@
 #![feature(proc_macro_hygiene, decl_macro)]
 
 #[macro_use]
-extern crate rocket;
-#[macro_use]
 extern crate mangle_rust_utils;
+#[macro_use]
+extern crate rocket;
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::{File};
+use std::fs::File;
 use std::hint::unreachable_unchecked;
 use std::io::{Error as IOError, ErrorKind, Read};
 use std::ops::{Add, Deref};
@@ -28,15 +28,14 @@ use simple_serde::PrimitiveSerializer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::select;
 
-use crate::singletons::{LoginResult, Logins, Pipes, Sessions, SpecialUsers, UserCreationError, SessionID, Credential};
 use crate::configs::read_config_file;
 use crate::mangle_rust_utils::Colorize;
+use crate::parsing::{UsedChallenges, UserCredentialData};
+use crate::singletons::{Credential, LoginResult, Logins, Pipes, SessionID, Sessions, SpecialUsers, UserCreationError};
 
 mod singletons;
 mod configs;
 mod parsing;
-
-use crate::parsing::{UsedChallenges, UserCredentialData};
 
 const MANGLE_DB_CLOSED: &str = "MangleDB has closed the connection";
 
@@ -536,7 +535,8 @@ async fn main() {
 				}
 			};
 		} => {},
-	};
+	}
+	;
 
 	warn!("Exit Successful!");
 	log_info!("Listener exited!");
