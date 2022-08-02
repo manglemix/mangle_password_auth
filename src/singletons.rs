@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use argon2::{Config as ArgonConfig, Error as ArgonError, hash_encoded};
 use async_std::sync::{Mutex, RwLock, RwLockUpgradableReadGuard};
 use ed25519_dalek::{PublicKey, Signature};
+use mangle_db_enums::MANGLE_DB_SUFFIX;
 use rand::{CryptoRng, Rng, RngCore, thread_rng};
 use rand::distributions::Alphanumeric;
 
@@ -60,15 +61,6 @@ use windows::*;
 pub enum Credential {
 	PasswordHash(String),
 	Key(PublicKey),
-}
-
-
-pub enum CredentialChallenge {
-	Password(String),
-	Signature {
-		message: String,
-		signature: Signature
-	}
 }
 
 
@@ -209,24 +201,33 @@ impl<'a> Logins<'a> {
 		Ok(())
 	}
 
-	pub async fn try_login(&self, username: &String, challenge: CredentialChallenge) -> LoginResult {
-		let reader = self.failed_logins.read().await;
+	pub async fn try_login_password(&self, username: &String, password: String) -> LoginResult {
+		{
+			let reader = self.failed_logins.read().await;
 
-		if let Some(x) = reader.get(username) {
-			if x.running_count >= self.max_fails && x.time.elapsed() < self.lockout_time {
-				return LoginResult::LockedOut
+			if let Some(x) = reader.get(username) {
+				if x.running_count >= self.max_fails {
+					if x.time.elapsed() < self.lockout_time {
+						return LoginResult::LockedOut
+					} else {
+						drop(reader);
+						let mut writer = self.failed_logins.write().await;
+						writer.remove(username);
+					}
+				}
 			}
 		}
 
 		let reader = self.user_cred_map.read().await;
 
 		match reader.get(username) {
-			Some(Credential::PasswordHash(hash)) => match challenge {
-				CredentialChallenge::Password(password) => if argon2::verify_encoded(hash, password.as_bytes()).unwrap() {
-					let reader = self.failed_logins.upgradable_read().await;
+			Some(Credential::PasswordHash(hash)) =>
+				if argon2::verify_encoded(hash, password.as_bytes()).unwrap() {
+					let reader = self.failed_logins.read().await;
 
 					if reader.contains_key(username) {
-						RwLockUpgradableReadGuard::upgrade(reader).await.remove(username);
+						drop(reader);
+						self.failed_logins.write().await.remove(username);
 					}
 
 					LoginResult::Ok
@@ -237,6 +238,7 @@ impl<'a> Logins<'a> {
 					if let Some(fail) = writer.get_mut(username) {
 						fail.running_count += 1;
 						fail.time = Instant::now();
+						// TODO Log brute force
 					} else {
 						writer.insert(Arc::new(username.clone()), FailedLoginAttempt {
 							running_count: 1,
@@ -245,31 +247,34 @@ impl<'a> Logins<'a> {
 					}
 
 					LoginResult::BadCredentialChallenge
-				}
-				_ => LoginResult::UnexpectedCredentials
-			},
+				},
+			Some(Credential::Key(_)) => LoginResult::UnexpectedCredentials,
+			None => LoginResult::NonexistentUser
+		}
+	}
 
-			Some(Credential::Key(key)) => match challenge {
-				CredentialChallenge::Signature {message, signature} => {
-					if !message.starts_with(&self.key_challenge_prefix) {
+	pub async fn try_login_key(&self, username: &String, challenge: String, signature: Signature) -> LoginResult {
+		let reader = self.user_cred_map.read().await;
+
+		match reader.get(username) {
+			Some(Credential::PasswordHash(_)) => LoginResult::UnexpectedCredentials,
+			Some(Credential::Key(key)) => {
+					if !challenge.starts_with(&self.key_challenge_prefix) {
 						return LoginResult::BadCredentialChallenge
 					}
 
 					let mut used_challenges = self.used_challenges.lock().await;
-					if used_challenges.contains(&message) {
+					if used_challenges.contains(&challenge) {
 						LoginResult::UsedChallenge
 
-					} else if key.verify_strict(message.as_bytes(), &signature).is_ok() {
-						used_challenges.insert(message);
+					} else if key.verify_strict(challenge.as_bytes(), &signature).is_ok() {
+						used_challenges.insert(challenge);
 						LoginResult::Ok
 
 					} else {
 						LoginResult::BadCredentialChallenge
 					}
 				}
-				_ => LoginResult::UnexpectedCredentials
-			}
-
 			None => LoginResult::NonexistentUser
 		}
 	}
@@ -395,7 +400,7 @@ impl Pipes {
 	pub fn new(local_bind_addr: String) -> Self {
 		Self {
 			free_pipes: Default::default(),
-			local_bind_addr
+			local_bind_addr: String::from(MANGLE_DB_SUFFIX) + local_bind_addr.as_str()
 		}
 	}
 	pub async fn take_pipe(&self) -> Result<BiPipe, IOError> {

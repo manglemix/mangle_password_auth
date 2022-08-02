@@ -1,5 +1,0 @@
-suffix = "progenitor"
-path_prefix = ""
-error_log_path = "errors.log"
-bind_addr = "127.0.0.1:8000"
-roles_path = "C:\\GitRepos\\mangle_db\\roles"

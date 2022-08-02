@@ -6,3 +6,5 @@
 errors.log
 
 users
+
+auth_config.toml

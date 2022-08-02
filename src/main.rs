@@ -6,13 +6,14 @@ extern crate rocket;
 extern crate mangle_rust_utils;
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::File;
+use std::fs::{File};
 use std::hint::unreachable_unchecked;
 use std::io::{Error as IOError, ErrorKind, Read};
 use std::ops::{Add, Deref};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::SystemTime;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use async_std::io::{self, WriteExt};
 use mangle_db_config_parse::ask_config_filename;
@@ -26,7 +27,7 @@ use simple_serde::PrimitiveSerializer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::select;
 
-use crate::singletons::{CredentialChallenge, LoginResult, Logins, Pipes, Sessions, SpecialUsers, UserCreationError, SessionID};
+use crate::singletons::{LoginResult, Logins, Pipes, Sessions, SpecialUsers, UserCreationError, SessionID, Credential};
 use crate::configs::read_config_file;
 use crate::mangle_rust_utils::Colorize;
 
@@ -45,10 +46,6 @@ struct OptimizedOption<T>(Option<T>);
 impl<T> OptimizedOption<T> {
 	const fn empty() -> Self {
 		Self(None)
-	}
-
-	fn new(value: T) -> Self {
-		Self(Some(value))
 	}
 
 	fn write(&mut self, value: T) {
@@ -79,18 +76,12 @@ static mut SPECIALS: OptimizedOption<SpecialUsers> = OptimizedOption::empty();
 
 macro_rules! write_socket {
     ($socket: expr, $payload: expr) => {
-		match $socket.write_all($payload).await {
-		Ok(_) => {}
-		Err(e) => {
-			if e.kind() == ErrorKind::BrokenPipe {
-				log_error!("{}", MANGLE_DB_CLOSED);
-			} else {
-				log_default_error!(e, "reading from local socket");
-			}
-			return make_response!(ServerError, DB_CONNECTION);
-		}
-	}};
+		write_socket!($socket, $payload, DB_CONNECTION)
+	};
     ($socket: expr, $payload: expr, either) => {
+		write_socket!($socket, $payload, Either::Left(DB_CONNECTION))
+	};
+    ($socket: expr, $payload: expr, $server_err_msg: expr) => {
 		match $socket.write_all($payload).await {
 		Ok(_) => {}
 		Err(e) => {
@@ -99,54 +90,50 @@ macro_rules! write_socket {
 			} else {
 				log_default_error!(e, "reading from local socket");
 			}
-			return make_response!(ServerError, Either::Left(DB_CONNECTION));
+			return make_response!(ServerError, $server_err_msg);
 		}
 	}};
 }
 
 
 macro_rules! read_socket {
-    ($socket: expr, $buffer_size: literal) => {{
-		let mut buffer = vec![0; $buffer_size];
-		match $socket.read(buffer.as_mut_slice()).await {
-			Ok(0) => {
-				log_error!("{}", MANGLE_DB_CLOSED);
-				return make_response!(ServerError, DB_CONNECTION);
-			}
-			Ok(n) => buffer = buffer[0..n].to_vec(),
-			Err(e) => {
-				if e.kind() == ErrorKind::BrokenPipe {
-					log_error!("{}", MANGLE_DB_CLOSED);
-				} else {
-					log_default_error!(e, "reading from local socket");
-				}
-				return make_response!(ServerError, DB_CONNECTION);
-			}
-		}
-		buffer
-	}};
 	($socket: expr) => {
-		read_socket!($socket, 128)
+		read_socket!($socket, DB_CONNECTION)
 	};
-	($socket: expr, either) => {
-		read_socket!($socket, 128, either)
+    ($socket: expr, either) => {
+		read_socket!($socket, Either::Left(DB_CONNECTION))
 	};
-    ($socket: expr, $buffer_size: literal, either) => {{
-		let mut buffer = vec![0; $buffer_size];
-		match $socket.read(buffer.as_mut_slice()).await {
-			Ok(0) => {
-				log_error!("{}", MANGLE_DB_CLOSED);
-				return make_response!(ServerError, Either::Left(DB_CONNECTION));
-			}
-			Ok(n) => buffer = buffer[0..n].to_vec(),
-			Err(e) => {
-				if e.kind() == ErrorKind::BrokenPipe {
+    ($socket: expr, $server_err_msg: expr) => {{
+		let mut size_buffer = [0u8; 5];
+
+		match $socket.read(size_buffer.as_mut_slice()).await {
+			Ok(_) => {}
+			Err(e) => return make_response!(ServerError, $server_err_msg)
+		}
+
+		let mut buffer;
+		if size_buffer[0] == 0 {
+			let size = u32::from_be_bytes([size_buffer[1], size_buffer[2], size_buffer[3], size_buffer[4]]) as usize;
+			buffer = vec![0; size];
+
+			match $socket.read_exact(buffer.as_mut_slice()).await {
+				Ok(0) => {
 					log_error!("{}", MANGLE_DB_CLOSED);
-				} else {
-					log_default_error!(e, "reading from local socket");
+					return make_response!(ServerError, $server_err_msg)
 				}
-				return make_response!(ServerError, Either::Left(DB_CONNECTION));
+				Err(e) => {
+					if e.kind() == ErrorKind::BrokenPipe {
+						log_error!("{}", MANGLE_DB_CLOSED);
+					} else {
+						log_default_error!(e, "reading from local socket");
+					}
+					return make_response!(ServerError, $server_err_msg)
+				}
+				_ => {}
 			}
+			buffer.insert(0, 0);
+		} else {
+			buffer = vec![size_buffer[0]];
 		}
 		buffer
 	}};
@@ -180,35 +167,25 @@ macro_rules! make_response {
 
 
 macro_rules! parse_header {
-    ($buffer: expr) => {{
+    ($buffer: expr) => {
+		parse_header!($buffer, BUG_MESSAGE)
+	};
+    ($buffer: expr, either) => {
+		parse_header!($buffer, Either::Left(BUG_MESSAGE))
+	};
+    ($buffer: expr, $err_msg: expr) => {{
 		let header = match $buffer.remove(0) {
 			Some(x) => x,
 			None => {
 				log_error!("Empty response from db");
-				return make_response!(ServerError, BUG_MESSAGE);
+				return make_response!(ServerError, $err_msg);
 			}
 		};
 		match TryInto::<GatewayResponseHeader>::try_into(header) {
 			Ok(x) => x,
 			Err(_) => {
 				log_error!("Unrecognised header {header}");
-				return make_response!(ServerError, BUG_MESSAGE);
-			}
-		}
-	}};
-    ($buffer: expr, either) => {{
-		let header = match $buffer.remove(0) {
-			Some(x) => x,
-			None => {
-				log_error!("Empty response from db");
-				return make_response!(ServerError, Either::Left(BUG_MESSAGE));
-			}
-		};
-		match TryInto::<GatewayResponseHeader>::try_into(header) {
-			Ok(x) => x,
-			Err(_) => {
-				log_error!("Unrecognised header {header}");
-				return make_response!(ServerError, Either::Left(BUG_MESSAGE));
+				return make_response!(ServerError, $err_msg);
 			}
 		}
 	}};
@@ -220,31 +197,23 @@ const SESSION_COOKIE_NAME: &str = "Session-ID";
 
 macro_rules! check_session_id {
     ($cookies: expr) => {
-		if let Some(cookie) = $cookies.get(SESSION_COOKIE_NAME) {
-			let session_id = match SessionID::try_from(cookie.value().to_string()) {
-				Ok(x) => x,
-				Err(_) => return make_response!(BadRequest, "The Session-ID is malformed")
-			};
-			if !unsafe { SESSIONS.is_valid_session(&session_id) }.await {
-				return make_response!(Status::Unauthorized, "The Session-ID is invalid or expired")
-			}
-			session_id
-		} else {
-			return make_response!(BadRequest, "Missing Session-ID header")
-		}
+		check_session_id!($cookies, "The Session-ID is malformed", "The Session-ID is invalid or expired", "Missing Session-ID cookie")
 	};
     ($cookies: expr, either) => {
+		check_session_id!($cookies, Either::Left("The Session-ID is malformed"), Either::Left("The Session-ID is invalid or expired"), Either::Left("Missing Session-ID cookie"))
+	};
+    ($cookies: expr, $err_msg1: expr, $err_msg2: expr, $err_msg3: expr) => {
 		if let Some(cookie) = $cookies.get(SESSION_COOKIE_NAME) {
 			let session_id = match SessionID::try_from(cookie.value().to_string()) {
 				Ok(x) => x,
-				Err(_) => return make_response!(BadRequest, Either::Left("The Session-ID is malformed"))
+				Err(_) => return make_response!(BadRequest, $err_msg1)
 			};
 			if !unsafe { SESSIONS.is_valid_session(&session_id) }.await {
-				return make_response!(Status::Unauthorized, Either::Left("The Session-ID is invalid or expired"))
+				return make_response!(Status::Unauthorized, $err_msg2)
 			}
 			session_id
 		} else {
-			return make_response!(BadRequest, Either::Left(("Missing Session-ID header")))
+			return make_response!(BadRequest, $err_msg3)
 		}
 	};
 }
@@ -271,6 +240,8 @@ async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>) -> (Status, Eit
 
 	let mut buffer: VecDeque<_> = read_socket!(socket, either).into();
 
+	unsafe { PIPES.return_pipe(socket) }.await;
+
 	match parse_header!(buffer, either) {
 		GatewayResponseHeader::Ok => {}
 		GatewayResponseHeader::InternalError => return make_response!(NotFound, Either::Left(BUG_MESSAGE)),
@@ -284,6 +255,19 @@ async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>) -> (Status, Eit
 			return make_response!(ServerError, Either::Left(BUG_MESSAGE))
 		}
 	};
+
+	let payload_size: u32 = match buffer.deserialize_num() {
+		Ok(x) => x,
+		Err(e) => {
+			log_default_error!(e, "parsing payload size from db response");
+			return make_response!(ServerError, Either::Left(BUG_MESSAGE))
+		}
+	};
+
+	if buffer.len() != payload_size as usize {
+		log_error!("Payload size mismatch:\n\texpected: {}\n\tactual: {}", payload_size, buffer.len());
+		return make_response!(ServerError, Either::Left(BUG_MESSAGE))
+	}
 
 	(Status::Ok, Either::Right((
 		match ContentType::parse_flexible(mime_type.as_str()) {
@@ -318,6 +302,8 @@ async fn put_resource(path: PathBuf, data: String, cookies: &CookieJar<'_>) -> R
 
 	let mut buffer: VecDeque<_> = read_socket!(socket).into();
 
+	unsafe { PIPES.return_pipe(socket) }.await;
+
 	match parse_header!(buffer) {
 		GatewayResponseHeader::Ok => make_response!(Ok, "Resource put successfully"),
 		GatewayResponseHeader::InternalError => make_response!(BUG),
@@ -328,13 +314,13 @@ async fn put_resource(path: PathBuf, data: String, cookies: &CookieJar<'_>) -> R
 
 #[get("/users_with_password?<username>&<password>")]
 async fn get_session_with_password(username: String, password: String, cookies: &CookieJar<'_>) -> Response {
-	match unsafe { LOGINS.try_login(&username, CredentialChallenge::Password(password)) }.await {
+	match unsafe { LOGINS.try_login_password(&username, password) }.await {
 		LoginResult::Ok => {
 			let session_id = unsafe { SESSIONS.create_session(username) }.await;
 			cookies.add(
 				Cookie::build(SESSION_COOKIE_NAME, session_id.to_string())
 					.expires(OffsetDateTime::from(SystemTime::now().add(unsafe { SESSIONS.max_session_duration }.clone())))
-					.secure(true)
+					// .secure(true)	TODO Re-implement!
 					.finish()
 			);
 			make_response!(Ok, "Authentication Successful")
@@ -354,7 +340,7 @@ async fn get_session_with_key(username: String, message: String, signature: Stri
 		Ok(x) => x,
 		Err(_) => return make_response!(BadRequest, "Invalid signature")
 	};
-	match unsafe { LOGINS.try_login(&username, CredentialChallenge::Signature{ message, signature }) }.await {
+	match unsafe { LOGINS.try_login_key(&username, message, signature) }.await {
 		LoginResult::Ok => {
 			let session_id = unsafe { SESSIONS.create_session(username) }.await;
 			cookies.add(
@@ -401,9 +387,9 @@ async fn make_user(username: String, password: String, cookies: &CookieJar<'_>) 
 }
 
 
-#[tokio::main]
+#[rocket::main]
 async fn main() {
-	let config_path = ask_config_filename("Mangle Password Auth", "auth_config");
+	let config_path = ask_config_filename("Mangle Password Auth", "auth_config.toml");
 	info!("Using {} as a config file", config_path);
 	let configs = read_config_file(config_path);
 
@@ -419,17 +405,19 @@ async fn main() {
 	);
 	drop(users_file);
 
-	let mut used_challenges_file = unwrap_result_or_default_error!(
-		File::open(&configs.used_challenges_path),
-		"opening used_challenges file"
-	);
-
 	let mut used_challenges = String::new();
-	unwrap_result_or_default_error!(
-		used_challenges_file.read_to_string(&mut used_challenges),
-		"reading used_challenges file"
-	);
-	drop(used_challenges_file);
+	match File::open(configs.used_challenges_path) {
+		Ok(mut file) => {
+			unwrap_result_or_default_error!(
+				file.read_to_string(&mut used_challenges),
+				"reading used challenges file"
+			);
+		}
+		Err(e) => match e.kind() {
+			ErrorKind::NotFound => {}
+			_ => default_error!(e, "opening used challenges file")
+		}
+	};
 
 	let used_challenges = UsedChallenges::from_str(used_challenges.as_str()).unwrap().0;
 	let userdata: HashMap<String, UserCredentialData> = unwrap_result_or_default_error!(
@@ -437,9 +425,33 @@ async fn main() {
 		"parsing users file"
 	);
 
-	// unsafe {
-	// 	LOGINS.write(Logins::new())
-	// }
+	let mut user_cred_map = HashMap::new();
+	let mut privileged = HashMap::new();
+
+	for (username, cred_data) in userdata {
+		let username = Arc::new(username);
+
+		if cred_data.privileges.is_empty() {
+			user_cred_map.insert(username, Credential::PasswordHash(cred_data.hash));
+		} else {
+			user_cred_map.insert(username.clone(), Credential::PasswordHash(cred_data.hash));
+			privileged.insert(username, cred_data.privileges);
+		}
+	}
+
+	unsafe {
+		LOGINS.write(Logins::new(
+			user_cred_map,
+			Duration::from_secs(configs.login_timeout),
+			configs.max_fails,
+			used_challenges,
+			configs.key_challenge_prefix,
+			configs.salt_len
+		));
+		SESSIONS.write(Sessions::new(Duration::from_secs(configs.max_session_duration)));
+		PIPES.write(Pipes::new(configs.suffix));
+		SPECIALS.write(SpecialUsers::new(privileged));
+	}
 
 	// info!("Binding to {bind_addr} on {}", &configs.mount_point);
 

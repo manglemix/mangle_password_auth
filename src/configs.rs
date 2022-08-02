@@ -17,6 +17,8 @@ pub struct Configs {
 	pub max_pipe_idle_duration: u64,
 	pub login_timeout: u64,
 	pub max_fails: u8,
+	pub key_challenge_prefix: String,
+	pub salt_len: u8
 }
 
 
@@ -32,6 +34,8 @@ impl Deserialize<ReadableProfile> for Configs {
 			max_pipe_idle_duration: data.deserialize_key_or("max_pipe_idle_duration", 1800u64)?,
 			login_timeout: data.deserialize_key_or("login_timeout", 600u64)?,
 			max_fails: data.deserialize_key_or("max_fails", 3u8)?,
+			key_challenge_prefix: data.deserialize_key_or("key_challenge_prefix", "mangleDB_challenge_")?,
+			salt_len: data.deserialize_key_or("salt_len", 32)?,
 		})
 	}
 }

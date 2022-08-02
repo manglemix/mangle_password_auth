@@ -26,8 +26,8 @@ impl Deserialize<ReadableProfile> for Privilege {
 
 
 pub struct UserCredentialData {
-	hash: String,
-	privileges: HashSet<Privilege>
+	pub hash: String,
+	pub privileges: HashSet<Privilege>
 }
 
 
@@ -41,16 +41,16 @@ impl Deserialize<ReadableProfile> for UserCredentialData {
 }
 
 
-pub struct UsedChallenges(pub(crate) Vec<String>);
+pub struct UsedChallenges(pub(crate) HashSet<String>);
 
 
 impl FromStr for UsedChallenges {
 	type Err = Infallible;
 
 	fn from_str(string: &str) -> Result<Self, Self::Err> {
-		let mut out = Vec::with_capacity(string.matches('\n').count() + 1);
+		let mut out = HashSet::with_capacity(string.matches('\n').count() + 1);
 		for line in string.split('\n') {
-			out.push(line.into())
+			out.insert(line.into());
 		}
 		Ok(Self(out))
 	}
