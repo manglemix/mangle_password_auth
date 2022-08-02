@@ -23,6 +23,7 @@ use rocket::Either;
 use rocket::fairing::AdHoc;
 use rocket::http::{ContentType, Cookie, CookieJar, Status};
 use rocket::time::OffsetDateTime;
+use rocket_async_compression::Compression;
 use simple_serde::PrimitiveSerializer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::select;
@@ -37,7 +38,7 @@ mod parsing;
 
 use crate::parsing::{UsedChallenges, UserCredentialData};
 
-const MANGLE_DB_CLOSED: &str = "MangleDB has closed the connections";
+const MANGLE_DB_CLOSED: &str = "MangleDB has closed the connection";
 
 
 struct OptimizedOption<T>(Option<T>);
@@ -103,35 +104,44 @@ macro_rules! read_socket {
     ($socket: expr, either) => {
 		read_socket!($socket, Either::Left(DB_CONNECTION))
 	};
-    ($socket: expr, $server_err_msg: expr) => {{
+    ($socket: expr, $conn_err_msg: expr) => {{
 		let mut size_buffer = [0u8; 5];
 
 		match $socket.read(size_buffer.as_mut_slice()).await {
+			Ok(0) => {
+				log_error!("{}", MANGLE_DB_CLOSED);
+				return make_response!(ServerError, $conn_err_msg)
+			}
+			Err(e) => {
+				log_default_error!(e, "reading header from pipe");
+				return make_response!(ServerError, $conn_err_msg)
+			}
 			Ok(_) => {}
-			Err(e) => return make_response!(ServerError, $server_err_msg)
 		}
 
 		let mut buffer;
 		if size_buffer[0] == 0 {
 			let size = u32::from_be_bytes([size_buffer[1], size_buffer[2], size_buffer[3], size_buffer[4]]) as usize;
 			buffer = vec![0; size];
-
-			match $socket.read_exact(buffer.as_mut_slice()).await {
-				Ok(0) => {
-					log_error!("{}", MANGLE_DB_CLOSED);
-					return make_response!(ServerError, $server_err_msg)
-				}
-				Err(e) => {
-					if e.kind() == ErrorKind::BrokenPipe {
+			if size > 0 {
+				match $socket.read_exact(buffer.as_mut_slice()).await {
+					Ok(0) => {
 						log_error!("{}", MANGLE_DB_CLOSED);
-					} else {
-						log_default_error!(e, "reading from local socket");
+						return make_response!(ServerError, $conn_err_msg)
 					}
-					return make_response!(ServerError, $server_err_msg)
+					Err(e) => {
+						if e.kind() == ErrorKind::BrokenPipe {
+							log_error!("{}", MANGLE_DB_CLOSED);
+						} else {
+							log_default_error!(e, "reading from local socket");
+						}
+						return make_response!(ServerError, $conn_err_msg)
+					}
+					_ => {}
 				}
-				_ => {}
 			}
 			buffer.insert(0, 0);
+
 		} else {
 			buffer = vec![size_buffer[0]];
 		}
@@ -307,7 +317,9 @@ async fn put_resource(path: PathBuf, data: String, cookies: &CookieJar<'_>) -> R
 	match parse_header!(buffer) {
 		GatewayResponseHeader::Ok => make_response!(Ok, "Resource put successfully"),
 		GatewayResponseHeader::InternalError => make_response!(BUG),
-		_ => make_response!(NotFound, "The given path could not be found"),
+		GatewayResponseHeader::NotFound | GatewayResponseHeader::BadPath => make_response!(NotFound, "The given path could not be found"),
+		GatewayResponseHeader::BadRequest => unreachable!(),
+		GatewayResponseHeader::BadResource => make_response!(BadRequest, "The given resource is not valid")
 	}
 }
 
@@ -476,6 +488,7 @@ async fn main() {
 				info!("Listener started up!");
 				drop(ready_tx);
 			})))
+			.attach(Compression::fairing())
 			.launch() => {
 			if let Err(e) = res {
 				log_default_error!(e, "serving http");
