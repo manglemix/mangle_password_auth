@@ -1,13 +1,12 @@
 #![feature(proc_macro_hygiene, decl_macro)]
 
 #[macro_use]
-extern crate mangle_rust_utils;
-#[macro_use]
 extern crate rocket;
+#[macro_use]
+extern crate mangle_rust_utils;
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::hint::unreachable_unchecked;
 use std::io::{Error as IOError, ErrorKind, Read};
 use std::ops::{Add, Deref};
 use std::path::PathBuf;
@@ -19,7 +18,7 @@ use async_std::io::{self, WriteExt};
 use mangle_db_config_parse::ask_config_filename;
 use mangle_db_enums::{GatewayRequestHeader, GatewayResponseHeader};
 use mangle_rust_utils::setup_logger_file;
-use rocket::Either;
+use rocket::{Either, State};
 use rocket::fairing::AdHoc;
 use rocket::http::{ContentType, Cookie, CookieJar, Status};
 use rocket::time::OffsetDateTime;
@@ -40,38 +39,9 @@ mod parsing;
 const MANGLE_DB_CLOSED: &str = "MangleDB has closed the connection";
 
 
-struct OptimizedOption<T>(Option<T>);
-
-
-impl<T> OptimizedOption<T> {
-	const fn empty() -> Self {
-		Self(None)
-	}
-
-	fn write(&mut self, value: T) {
-		self.0 = Some(value);
-	}
-}
-
-
-impl<T> Deref for OptimizedOption<T> {
-	type Target = T;
-
-	fn deref(&self) -> &Self::Target {
-		unsafe {
-			match &self.0 {
-				None => unreachable_unchecked(),
-				Some(x) => x
-			}
-		}
-	}
-}
-
-
-static mut LOGINS: OptimizedOption<Logins> = OptimizedOption::empty();
-static mut PIPES: OptimizedOption<Pipes> = OptimizedOption::empty();
-static mut SESSIONS: OptimizedOption<Sessions> = OptimizedOption::empty();
-static mut SPECIALS: OptimizedOption<SpecialUsers> = OptimizedOption::empty();
+type LoginState = State<Arc<Logins>>;
+type SessionState = State<Arc<Sessions>>;
+type PipeData = State<Arc<Pipes>>;
 
 
 macro_rules! write_socket {
@@ -205,19 +175,19 @@ const SESSION_COOKIE_NAME: &str = "Session-ID";
 
 
 macro_rules! check_session_id {
-    ($cookies: expr) => {
-		check_session_id!($cookies, "The Session-ID is malformed", "The Session-ID is invalid or expired", "Missing Session-ID cookie")
+    ($session: expr, $cookies: expr) => {
+		check_session_id!($session, $cookies, "The Session-ID is malformed", "The Session-ID is invalid or expired", "Missing Session-ID cookie")
 	};
-    ($cookies: expr, either) => {
-		check_session_id!($cookies, Either::Left("The Session-ID is malformed"), Either::Left("The Session-ID is invalid or expired"), Either::Left("Missing Session-ID cookie"))
+    ($session: expr, $cookies: expr, either) => {
+		check_session_id!($session, $cookies, Either::Left("The Session-ID is malformed"), Either::Left("The Session-ID is invalid or expired"), Either::Left("Missing Session-ID cookie"))
 	};
-    ($cookies: expr, $err_msg1: expr, $err_msg2: expr, $err_msg3: expr) => {
+    ($session: expr, $cookies: expr, $err_msg1: expr, $err_msg2: expr, $err_msg3: expr) => {
 		if let Some(cookie) = $cookies.get(SESSION_COOKIE_NAME) {
 			let session_id = match SessionID::try_from(cookie.value().to_string()) {
 				Ok(x) => x,
 				Err(_) => return make_response!(BadRequest, $err_msg1)
 			};
-			if !unsafe { SESSIONS.is_valid_session(&session_id) }.await {
+			if !$session.is_valid_session(&session_id).await {
 				return make_response!(Status::Unauthorized, $err_msg2)
 			}
 			session_id
@@ -231,10 +201,10 @@ type Response = (Status, &'static str);
 
 
 #[get("/<path..>")]
-async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>) -> (Status, Either<&'static str, (ContentType, Vec<u8>)>) {
-	check_session_id!(cookies, either);
+async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>, pipes: &PipeData, sessions: &SessionState) -> (Status, Either<&'static str, (ContentType, Vec<u8>)>) {
+	check_session_id!(sessions, cookies, either);
 
-	let mut socket = match unsafe { PIPES.take_pipe() }.await {
+	let mut socket = match pipes.take_pipe().await {
 		Ok(x) => x,
 		Err(e) => {
 			log_default_error!(e, "connecting to db");
@@ -249,7 +219,7 @@ async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>) -> (Status, Eit
 
 	let mut buffer: VecDeque<_> = read_socket!(socket, either).into();
 
-	unsafe { PIPES.return_pipe(socket) }.await;
+	pipes.return_pipe(socket).await;
 
 	match parse_header!(buffer, either) {
 		GatewayResponseHeader::Ok => {}
@@ -292,9 +262,9 @@ async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>) -> (Status, Eit
 
 
 #[put("/<path..>", data = "<data>")]
-async fn put_resource(path: PathBuf, data: String, cookies: &CookieJar<'_>) -> Response {
-	check_session_id!(cookies);
-	let mut socket = match unsafe { PIPES.take_pipe() }.await {
+async fn put_resource(path: PathBuf, data: String, cookies: &CookieJar<'_>, pipes: &PipeData, sessions: &SessionState) -> Response {
+	check_session_id!(sessions, cookies);
+	let mut socket = match pipes.take_pipe().await {
 		Ok(x) => x,
 		Err(e) => {
 			log_default_error!(e, "connecting to db");
@@ -311,7 +281,7 @@ async fn put_resource(path: PathBuf, data: String, cookies: &CookieJar<'_>) -> R
 
 	let mut buffer: VecDeque<_> = read_socket!(socket).into();
 
-	unsafe { PIPES.return_pipe(socket) }.await;
+	pipes.return_pipe(socket).await;
 
 	match parse_header!(buffer) {
 		GatewayResponseHeader::Ok => make_response!(Ok, "Resource put successfully"),
@@ -324,13 +294,13 @@ async fn put_resource(path: PathBuf, data: String, cookies: &CookieJar<'_>) -> R
 
 
 #[get("/users_with_password?<username>&<password>")]
-async fn get_session_with_password(username: String, password: String, cookies: &CookieJar<'_>) -> Response {
-	match unsafe { LOGINS.try_login_password(&username, password) }.await {
+async fn get_session_with_password(username: String, password: String, cookies: &CookieJar<'_>, logins: &LoginState, sessions: &SessionState) -> Response {
+	match logins.try_login_password(&username, password).await {
 		LoginResult::Ok => {
-			let session_id = unsafe { SESSIONS.create_session(username) }.await;
+			let session_id = sessions.create_session(username).await;
 			cookies.add(
 				Cookie::build(SESSION_COOKIE_NAME, session_id.to_string())
-					.expires(OffsetDateTime::from(SystemTime::now().add(unsafe { SESSIONS.max_session_duration }.clone())))
+					.expires(OffsetDateTime::from(SystemTime::now().add(sessions.max_session_duration.clone())))
 					// .secure(true)	TODO Re-implement!
 					.finish()
 			);
@@ -346,17 +316,17 @@ async fn get_session_with_password(username: String, password: String, cookies: 
 
 
 #[get("/users_with_key?<username>&<message>&<signature>")]
-async fn get_session_with_key(username: String, message: String, signature: String, cookies: &CookieJar<'_>) -> Response {
+async fn get_session_with_key(username: String, message: String, signature: String, cookies: &CookieJar<'_>, logins: &LoginState, sessions: &SessionState) -> Response {
 	let signature = match signature.parse() {
 		Ok(x) => x,
 		Err(_) => return make_response!(BadRequest, "Invalid signature")
 	};
-	match unsafe { LOGINS.try_login_key(&username, message, signature) }.await {
+	match logins.try_login_key(&username, message, signature).await {
 		LoginResult::Ok => {
-			let session_id = unsafe { SESSIONS.create_session(username) }.await;
+			let session_id = sessions.create_session(username).await;
 			cookies.add(
 				Cookie::build(SESSION_COOKIE_NAME, session_id.to_string())
-					.expires(OffsetDateTime::from(SystemTime::now().add(unsafe { SESSIONS.max_session_duration }.clone())))
+					.expires(OffsetDateTime::from(SystemTime::now().add(sessions.max_session_duration.clone())))
 					.secure(true)
 					.finish()
 			);
@@ -372,10 +342,10 @@ async fn get_session_with_key(username: String, message: String, signature: Stri
 
 
 #[put("/create_user_with_password?<username>&<password>")]
-async fn make_user(username: String, password: String, cookies: &CookieJar<'_>) -> Response {
-	let session_id = check_session_id!(cookies);
-	match unsafe { SESSIONS.get_session_owner(&session_id) }.await {
-		Some(creator) => if !unsafe { SPECIALS.can_user_create_user(&creator) } {
+async fn make_user(username: String, password: String, cookies: &CookieJar<'_>, logins: &LoginState, sessions: &SessionState, specials: &State<SpecialUsers>) -> Response {
+	let session_id = check_session_id!(sessions, cookies);
+	match sessions.get_session_owner(&session_id).await {
+		Some(creator) => if !specials.can_user_create_user(&creator) {
 			return make_response!(Status::Unauthorized, "You are not authorized to create users")
 		}
 		None => {
@@ -384,7 +354,7 @@ async fn make_user(username: String, password: String, cookies: &CookieJar<'_>) 
 		}
 	}
 
-	match unsafe { LOGINS.add_user(username, password) }.await {
+	match logins.add_user(username, password).await {
 		Ok(()) => make_response!(Ok, "User created successfully"),
 		Err(e) => match e {
 			UserCreationError::ArgonError(e) => {
@@ -393,6 +363,7 @@ async fn make_user(username: String, password: String, cookies: &CookieJar<'_>) 
 			},
 			UserCreationError::UsernameInUse => make_response!(BadRequest, "Username already in use"),
 			UserCreationError::BadPassword => make_response!(BadRequest, "Password is not strong enough"),
+			UserCreationError::BadUsername => make_response!(BadRequest, "Username is not alphanumeric or too short or too long")
 		}
 	}
 }
@@ -440,28 +411,12 @@ async fn main() {
 	let mut privileged = HashMap::new();
 
 	for (username, cred_data) in userdata {
-		let username = Arc::new(username);
-
 		if cred_data.privileges.is_empty() {
 			user_cred_map.insert(username, Credential::PasswordHash(cred_data.hash));
 		} else {
 			user_cred_map.insert(username.clone(), Credential::PasswordHash(cred_data.hash));
 			privileged.insert(username, cred_data.privileges);
 		}
-	}
-
-	unsafe {
-		LOGINS.write(Logins::new(
-			user_cred_map,
-			Duration::from_secs(configs.login_timeout),
-			configs.max_fails,
-			used_challenges,
-			configs.key_challenge_prefix,
-			configs.salt_len
-		));
-		SESSIONS.write(Sessions::new(Duration::from_secs(configs.max_session_duration)));
-		PIPES.write(Pipes::new(configs.suffix));
-		SPECIALS.write(SpecialUsers::new(privileged));
 	}
 
 	// info!("Binding to {bind_addr} on {}", &configs.mount_point);
@@ -488,6 +443,20 @@ async fn main() {
 				drop(ready_tx);
 			})))
 			.attach(Compression::fairing())
+			.manage(Logins::new(
+				user_cred_map,
+				Duration::from_secs(configs.login_timeout),
+				configs.max_fails,
+				used_challenges,
+				configs.key_challenge_prefix,
+				configs.salt_len,
+				configs.min_username_len,
+				configs.max_username_len,
+				configs.cleanup_delay
+			))
+			.manage(Sessions::new(Duration::from_secs(configs.max_session_duration), configs.cleanup_delay))
+			.manage(Pipes::new(configs.suffix, configs.cleanup_delay))
+			.manage(SpecialUsers::new(privileged))
 			.launch() => {
 			if let Err(e) = res {
 				log_default_error!(e, "serving http");

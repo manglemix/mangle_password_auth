@@ -17,7 +17,10 @@ pub struct Configs {
 	pub login_timeout: u64,
 	pub max_fails: u8,
 	pub key_challenge_prefix: String,
-	pub salt_len: u8
+	pub salt_len: u8,
+	pub min_username_len: u8,
+	pub max_username_len: u8,
+	pub cleanup_delay: u32
 }
 
 
@@ -35,6 +38,9 @@ impl Deserialize<ReadableProfile> for Configs {
 			max_fails: data.deserialize_key_or("max_fails", 3u8)?,
 			key_challenge_prefix: data.deserialize_key_or("key_challenge_prefix", "mangleDB_challenge_")?,
 			salt_len: data.deserialize_key_or("salt_len", 32)?,
+			min_username_len: data.deserialize_key_or("min_username_len", 8)?,
+			max_username_len: data.deserialize_key_or("max_username_len", 16)?,
+			cleanup_delay: data.deserialize_key_or("cleanup_delay", 7200u32)?
 		})
 	}
 }

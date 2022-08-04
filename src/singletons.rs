@@ -10,14 +10,13 @@ use ed25519_dalek::{PublicKey, Signature};
 use mangle_db_enums::MANGLE_DB_SUFFIX;
 use rand::{CryptoRng, Rng, RngCore, thread_rng};
 use rand::distributions::Alphanumeric;
+use tokio::spawn;
+use tokio::time::sleep;
 
 #[cfg(windows)]
 use windows::*;
 
 use crate::*;
-use crate::mangle_rust_utils::Colorize;
-
-type ArcString = Arc<String>;
 
 
 #[cfg(windows)]
@@ -98,7 +97,8 @@ pub enum Privilege {
 pub enum UserCreationError {
 	UsernameInUse,
 	BadPassword,
-	ArgonError(ArgonError)
+	ArgonError(ArgonError),
+	BadUsername
 }
 
 
@@ -108,30 +108,32 @@ pub struct SessionID([char; 32]);
 
 pub struct SessionData {
 	creation_time: Instant,
-	owning_user: ArcString
+	owning_user: String
 }
 
 
-pub struct Logins<'a> {
-	user_cred_map: RwLock<HashMap<ArcString, Credential>>,
+pub struct Logins {
+	user_cred_map: RwLock<HashMap<String, Credential>>,
 	lockout_time: Duration,
 	max_fails: u8,
-	failed_logins: RwLock<HashMap<ArcString, FailedLoginAttempt>>,
+	failed_logins: RwLock<HashMap<String, FailedLoginAttempt>>,
 	used_challenges: Mutex<HashSet<String>>,
 	key_challenge_prefix: String,
-	argon2_config: ArgonConfig<'a>,
-	salt_len: u8
+	argon2_config: ArgonConfig<'static>,
+	salt_len: u8,
+	min_username_len: u8,
+	max_username_len: u8
 }
 
 
 pub struct SpecialUsers {
-	privileged: HashMap<ArcString, HashSet<Privilege>>
+	privileged: HashMap<String, HashSet<Privilege>>
 }
 
 
 pub struct Sessions {
-	user_session_map: RwLock<HashMap<ArcString, Arc<SessionID>>>,
-	session_user_map: RwLock<HashMap<Arc<SessionID>, ArcString>>,
+	user_session_map: RwLock<HashMap<String, Arc<SessionID>>>,
+	session_user_map: RwLock<HashMap<Arc<SessionID>, String>>,
 	sessions: RwLock<HashMap<SessionID, SessionData>>,
 	pub(crate) max_session_duration: Duration
 }
@@ -148,18 +150,23 @@ impl From<ArgonError> for UserCreationError {
 		Self::ArgonError(e)
 	}
 }
-
-
-impl<'a> Logins<'a> {
+impl Logins {
 	pub fn new(
-		user_cred_map: HashMap<ArcString, Credential>,
+		user_cred_map: HashMap<String, Credential>,
 		lockout_time: Duration,
 		max_fails: u8,
 		used_challenges: HashSet<String>,
 		key_challenge_prefix: String,
-		salt_len: u8
-	) -> Self {
-		Self {
+		salt_len: u8,
+		min_username_len: u8,
+		max_username_len: u8,
+		cleanup_delay: u32
+	) -> Arc<Self> {
+		if max_username_len < min_username_len {
+			panic!("max_username_len is smaller than min_username_len!")
+		}
+
+		let out = Arc::new(Self {
 			user_cred_map: RwLock::new(user_cred_map),
 			lockout_time,
 			max_fails,
@@ -167,8 +174,21 @@ impl<'a> Logins<'a> {
 			failed_logins: Default::default(),
 			key_challenge_prefix,
 			argon2_config: ArgonConfig::default(),
-			salt_len
-		}
+			salt_len,
+			min_username_len,
+			max_username_len
+		});
+
+		let out_clone = out.clone();
+		spawn(async move {
+			let duration = Duration::from_secs(cleanup_delay as u64);
+			loop {
+				sleep(duration).await;
+				out_clone.prune_expired().await;
+			}
+		});
+
+		out
 	}
 
 	pub async fn prune_expired(&self) {
@@ -182,13 +202,16 @@ impl<'a> Logins<'a> {
 	}
 
 	pub async fn add_user(&self, username: String, password: String) -> Result<(), UserCreationError> {
+		if username.len() < self.min_username_len as usize || username.len() > self.max_username_len as usize || !username.chars().all(char::is_alphanumeric) {
+			return Err(UserCreationError::BadUsername)
+		}
 		let reader = self.user_cred_map.upgradable_read().await;
 		if reader.contains_key(&username) {
 			return Err(UserCreationError::UsernameInUse)
 		}
 		let mut writer = RwLockUpgradableReadGuard::upgrade(reader).await;
 
-		writer.insert(Arc::new(username), Credential::PasswordHash(
+		writer.insert(username, Credential::PasswordHash(
 			hash_encoded(
 				password.as_bytes(),
 				thread_rng()
@@ -241,7 +264,7 @@ impl<'a> Logins<'a> {
 						fail.time = Instant::now();
 						// TODO Log brute force
 					} else {
-						writer.insert(Arc::new(username.clone()), FailedLoginAttempt {
+						writer.insert(username.clone(), FailedLoginAttempt {
 							running_count: 1,
 							time: Instant::now()
 						});
@@ -281,7 +304,7 @@ impl<'a> Logins<'a> {
 
 
 impl SpecialUsers {
-	pub fn new(privileged: HashMap<ArcString, HashSet<Privilege>>) -> Self {
+	pub fn new(privileged: HashMap<String, HashSet<Privilege>>) -> Self {
 		Self {
 			privileged
 		}
@@ -330,13 +353,24 @@ impl TryFrom<String> for SessionID {
 
 
 impl Sessions {
-	pub fn new(max_session_duration: Duration) -> Self {
-		Self {
+	pub fn new(max_session_duration: Duration, cleanup_delay: u32) -> Arc<Self> {
+		let out = Arc::new(Self {
 			user_session_map: Default::default(),
 			session_user_map: Default::default(),
 			sessions: Default::default(),
 			max_session_duration
-		}
+		});
+
+		let out_clone = out.clone();
+		spawn(async move {
+			let duration = Duration::from_secs(cleanup_delay as u64);
+			loop {
+				sleep(duration).await;
+				out_clone.prune_expired().await;
+			}
+		});
+
+		out
 	}
 	pub async fn create_session(&self, username: String) -> SessionID {
 		if let Some(x) = self.user_session_map.read().await.get(&username) {
@@ -355,7 +389,6 @@ impl Sessions {
 			}
 		}
 
-		let username = Arc::new(username);
 		writer.insert(session_id.clone(), SessionData {
 			creation_time: Instant::now(),
 			owning_user: username.clone()
@@ -389,18 +422,29 @@ impl Sessions {
 		self.sessions.read().await.contains_key(session_id)
 	}
 
-	pub async fn get_session_owner(&self, session_id: &SessionID) -> Option<ArcString> {
+	pub async fn get_session_owner(&self, session_id: &SessionID) -> Option<String> {
 		self.session_user_map.read().await.get(session_id).cloned()
 	}
 }
 
 
 impl Pipes {
-	pub fn new(local_bind_addr: String) -> Self {
-		Self {
+	pub fn new(local_bind_addr: String, cleanup_delay: u32) -> Arc<Self> {
+		let out = Arc::new(Self {
 			free_pipes: Default::default(),
 			local_bind_addr: String::from(MANGLE_DB_SUFFIX) + local_bind_addr.as_str()
-		}
+		});
+
+		let out_clone = out.clone();
+		spawn(async move {
+			let duration = Duration::from_secs(cleanup_delay as u64);
+			loop {
+				sleep(duration).await;
+				out_clone.prune_pipes().await;
+			}
+		});
+
+		out
 	}
 	pub async fn take_pipe(&self) -> Result<BiPipe, IOError> {
 		if let Some(x) = self.free_pipes.lock().await.pop() {
