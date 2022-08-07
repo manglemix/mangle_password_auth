@@ -8,6 +8,7 @@ use argon2::{Config as ArgonConfig, Error as ArgonError, hash_encoded};
 use async_std::sync::{Mutex, RwLock, RwLockUpgradableReadGuard};
 use ed25519_dalek::{PublicKey, Signature};
 use mangle_db_enums::MANGLE_DB_SUFFIX;
+use mangle_rust_utils::NestedMap;
 use rand::{CryptoRng, Rng, RngCore, thread_rng};
 use rand::distributions::Alphanumeric;
 use tokio::spawn;
@@ -29,32 +30,32 @@ mod windows {
 
 	use super::IOError;
 
-	pub struct BiPipe(NamedPipeClient);
+	pub struct BiPipe(Pin<Box<NamedPipeClient>>);
 
 	impl BiPipe {
 		pub fn connect(to: &str) -> Result<Self, IOError> {
 			ClientOptions::new()
-				.open(r"\\.\pipe\".to_string() + to).map(|x| Self(x))
+				.open(r"\\.\pipe\".to_string() + to).map(|x| Self(Box::pin(x)))
 		}
 	}
 
 	impl AsyncRead for BiPipe {
 		fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
-			Pin::new(&mut self.0).poll_read(cx, buf)
+			self.0.as_mut().poll_read(cx, buf)
 		}
 	}
 
 	impl AsyncWrite for BiPipe {
 		fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, IOError>> {
-			Pin::new(&mut self.0).poll_write(cx, buf)
+			self.0.as_mut().poll_write(cx, buf)
 		}
 
 		fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IOError>> {
-			Pin::new(&mut self.0).poll_flush(cx)
+			self.0.as_mut().poll_flush(cx)
 		}
 
 		fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IOError>> {
-			Pin::new(&mut self.0).poll_shutdown(cx)
+			self.0.as_mut().poll_shutdown(cx)
 		}
 	}
 }
@@ -145,11 +146,24 @@ pub struct Pipes {
 }
 
 
+pub struct Permissions {
+	public_read_paths: NestedMap<String, ()>,
+	user_read_paths: HashMap<String, NestedMap<String, ()>>,
+	user_write_paths: HashMap<String, NestedMap<String, ()>>,
+	all_user_read_paths: NestedMap<String, ()>,
+	all_user_write_paths: NestedMap<String, ()>,
+	user_home_parent: Vec<String>,
+	user_home_parent_segment_count: usize,
+}
+
+
 impl From<ArgonError> for UserCreationError {
 	fn from(e: ArgonError) -> Self {
 		Self::ArgonError(e)
 	}
 }
+
+
 impl Logins {
 	pub fn new(
 		user_cred_map: HashMap<String, Credential>,
@@ -460,5 +474,77 @@ impl Pipes {
 
 	pub async fn prune_pipes(&self) {
 		self.free_pipes.lock().await.clear();
+	}
+}
+
+
+impl Permissions {
+	pub fn new(
+		public_read_paths: NestedMap<String, ()>,
+		all_user_read_paths: NestedMap<String, ()>,
+		all_user_write_paths: NestedMap<String, ()>,
+		user_home_parent: Vec<String>,
+		user_read_paths: HashMap<String, NestedMap<String, ()>>,
+		user_write_paths: HashMap<String, NestedMap<String, ()>>,
+	) -> Self {
+		Self {
+			public_read_paths,
+			user_read_paths,
+			user_write_paths,
+			all_user_read_paths,
+			all_user_write_paths,
+			user_home_parent_segment_count: user_home_parent.len(),
+			user_home_parent,
+		}
+	}
+
+	pub fn can_anonymous_read_here(&self, path: &PathBuf) -> bool {
+		self.public_read_paths.partial_contains(path_buf_to_segments(path))
+	}
+
+	pub fn can_user_write_here(&self, username: &String, path: &PathBuf) -> bool {
+		let mut segments = path_buf_to_segments(path);
+
+		if segments.starts_with(self.user_home_parent.as_slice()) {
+			if let Some(user_path) = segments.get(self.user_home_parent_segment_count) {
+				if user_path != username {
+					return false
+				}
+				segments.drain(0..(self.user_home_parent_segment_count + 1));
+				self.all_user_write_paths.partial_contains(segments)
+			} else {
+				false
+			}
+		} else {
+			match self.user_write_paths.get(username) {
+				None => false,
+				Some(x) => x.partial_contains(segments)
+			}
+		}
+	}
+
+	pub fn can_user_read_here(&self, username: &String, path: &PathBuf) -> bool {
+		let mut segments = path_buf_to_segments(path);
+
+		if self.public_read_paths.partial_contains(segments.iter()) {
+			return true
+		}
+
+		if segments.starts_with(self.user_home_parent.as_slice()) {
+			if let Some(user_path) = segments.get(self.user_home_parent_segment_count) {
+				if user_path != username {
+					return false
+				}
+				segments.drain(0..(self.user_home_parent_segment_count + 1));
+				self.all_user_read_paths.partial_contains(segments)
+			} else {
+				false
+			}
+		} else {
+			match self.user_read_paths.get(username) {
+				None => false,
+				Some(x) => x.partial_contains(segments)
+			}
+		}
 	}
 }

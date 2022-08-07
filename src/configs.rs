@@ -1,10 +1,12 @@
-use std::fs::File;
-use std::io::Read;
-use std::path::Path;
+use async_std::fs::File;
+use async_std::io::ReadExt;
+use async_std::path::{Path};
 
-use simple_serde::{prelude::*, toml_prelude::*};
+use simple_serde::{mlist_prelude::*, prelude::*, toml_prelude::*};
 
-use crate::mangle_rust_utils::Colorize;
+use crate::{LOG};
+use super::*;
+
 
 pub struct Configs {
 	pub suffix: String,
@@ -20,7 +22,8 @@ pub struct Configs {
 	pub salt_len: u8,
 	pub min_username_len: u8,
 	pub max_username_len: u8,
-	pub cleanup_delay: u32
+	pub cleanup_delay: u32,
+	pub permissions_path: String
 }
 
 
@@ -40,22 +43,21 @@ impl Deserialize<ReadableProfile> for Configs {
 			salt_len: data.deserialize_key_or("salt_len", 32)?,
 			min_username_len: data.deserialize_key_or("min_username_len", 8)?,
 			max_username_len: data.deserialize_key_or("max_username_len", 16)?,
-			cleanup_delay: data.deserialize_key_or("cleanup_delay", 7200u32)?
+			cleanup_delay: data.deserialize_key_or("cleanup_delay", 7200u32)?,
+			permissions_path: data.deserialize_key_or("permissions_path", "permissions.mlist")?
 		})
 	}
 }
 
-impl_toml_deser!(Configs, ReadableProfile);
 
-
-pub fn read_config_file<T: AsRef<Path>>(path: T) -> Configs {
+pub async fn read_config_file<T: AsRef<Path>>(path: T) -> Configs {
 	let mut file = unwrap_result_or_default_error!(
-		File::open(path),
+		File::open(path).await,
 		"opening config file"
 	);
 	let mut data = String::new();
 	unwrap_result_or_default_error!(
-		file.read_to_string(&mut data),
+		file.read_to_string(&mut data).await,
 		"reading config file"
 	);
 	unwrap_result_or_default_error!(
@@ -64,3 +66,4 @@ pub fn read_config_file<T: AsRef<Path>>(path: T) -> Configs {
 	)
 }
 
+impl_toml_deser!(Configs, ReadableProfile);

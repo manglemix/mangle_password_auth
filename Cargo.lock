@@ -173,9 +173,9 @@ dependencies = [
 
 [[package]]
 name = "async-std"
-version = "1.11.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52580991739c5cdb36cde8b2a516371c0a3b70dda36d916cc08b82372916808c"
+checksum = "62565bb4402e926b29953c785397c6dc0391b7b446e45008b0049eb43cec6f5d"
 dependencies = [
  "async-attributes",
  "async-channel",
@@ -191,7 +191,6 @@ dependencies = [
  "kv-log-macro",
  "log",
  "memchr",
- "num_cpus",
  "once_cell",
  "pin-project-lite",
  "pin-utils",
@@ -228,9 +227,9 @@ checksum = "30696a84d817107fc028e049980e09d5e140e8da8f1caeb17e8e950658a3cea9"
 
 [[package]]
 name = "async-trait"
-version = "0.1.56"
+version = "0.1.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96cf8829f67d2eab0b2dfa42c5d0ef737e0724e4a82b01b3e292456202b19716"
+checksum = "76464446b8bc32758d7e88ee1a804d9914cd9b1cb264c029899680b0be29826f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -389,14 +388,15 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
 name = "chrono"
-version = "0.4.19"
+version = "0.4.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "670ad68c9088c2a963aaa298cb369688cf3f9465ce5e2d4ca10e6e0098a1ce73"
+checksum = "6127248204b9aba09a362f6c930ef6a78f2c1b2215f8a7b398c06e1083f17af0"
 dependencies = [
- "libc",
+ "js-sys",
  "num-integer",
  "num-traits",
  "time 0.1.44",
+ "wasm-bindgen",
  "winapi",
 ]
 
@@ -1081,11 +1081,6 @@ version = "0.1.0"
 [[package]]
 name = "mangle-rust-utils"
 version = "0.1.0"
-dependencies = [
- "chrono",
- "colored",
- "log",
-]
 
 [[package]]
 name = "mangle_password_auth"
@@ -1093,9 +1088,7 @@ version = "0.1.0"
 dependencies = [
  "async-std",
  "async-trait",
- "base64",
  "ed25519-dalek",
- "futures-lite",
  "mangle-db-config-parse",
  "mangle-db-enums",
  "mangle-rust-utils",
@@ -1103,6 +1096,7 @@ dependencies = [
  "rocket",
  "rocket_async_compression",
  "rust-argon2",
+ "simple-logger",
  "simple-serde",
  "tokio",
 ]
@@ -1746,6 +1740,16 @@ name = "signature"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f054c6c1a6e95179d6f23ed974060dcefb2d9388bb7256900badad682c499de4"
+
+[[package]]
+name = "simple-logger"
+version = "0.1.0"
+dependencies = [
+ "async-std",
+ "async-trait",
+ "chrono",
+ "colored",
+]
 
 [[package]]
 name = "simple-serde"

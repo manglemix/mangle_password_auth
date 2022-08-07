@@ -1,6 +1,5 @@
 #![feature(proc_macro_hygiene, decl_macro)]
 
-#[macro_use]
 extern crate rocket;
 #[macro_use]
 extern crate mangle_rust_utils;
@@ -17,31 +16,47 @@ use std::time::{Duration, SystemTime};
 use async_std::io::{self, WriteExt};
 use mangle_db_config_parse::ask_config_filename;
 use mangle_db_enums::{GatewayRequestHeader, GatewayResponseHeader};
-use mangle_rust_utils::setup_logger_file;
 use rocket::{Either, State};
 use rocket::fairing::AdHoc;
 use rocket::http::{ContentType, Cookie, CookieJar, Status};
 use rocket::time::OffsetDateTime;
 use rocket_async_compression::Compression;
 use simple_serde::PrimitiveSerializer;
+use simple_serde::mlist_prelude::MListDeserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::select;
+use parsing::{PermissionsDeser};
 
-use crate::configs::read_config_file;
-use crate::mangle_rust_utils::Colorize;
-use crate::parsing::{UsedChallenges, UserCredentialData};
-use crate::singletons::{Credential, LoginResult, Logins, Pipes, SessionID, Sessions, SpecialUsers, UserCreationError};
+use parsing::{UsedChallenges, UserCredentialData};
+use singletons::{Credential, LoginResult, Logins, Permissions, Pipes, SessionID, Sessions, SpecialUsers, UserCreationError};
+use configs::read_config_file;
+
+use simple_logger::prelude::*;
 
 mod singletons;
 mod configs;
 mod parsing;
 
 const MANGLE_DB_CLOSED: &str = "MangleDB has closed the connection";
+const RESOURCE_NOT_FOUND: &str = "Resource not found, or you do not have adequate permissions";
+
+
+declare_logger!(Stderr, STDERR, 0, );
+declare_logger!(File, LOG, 0, );
+define_error!(LOG, export);
+define_info!(LOG, export);
+define_warn!(LOG, export);
 
 
 type LoginState = State<Arc<Logins>>;
 type SessionState = State<Arc<Sessions>>;
 type PipeData = State<Arc<Pipes>>;
+type PermissionsState = State<Permissions>;
+
+
+fn path_buf_to_segments(path: &PathBuf) -> Vec<String> {
+	path.components().map(|x| x.as_os_str().to_str().map(|x| x.to_string())).flatten().collect()
+}
 
 
 macro_rules! write_socket {
@@ -56,9 +71,9 @@ macro_rules! write_socket {
 		Ok(_) => {}
 		Err(e) => {
 			if e.kind() == ErrorKind::BrokenPipe {
-				log_error!("{}", MANGLE_DB_CLOSED);
+				error!("{}", MANGLE_DB_CLOSED);
 			} else {
-				log_default_error!(e, "reading from local socket");
+				default_error!(e, "reading from local socket");
 			}
 			return make_response!(ServerError, $server_err_msg);
 		}
@@ -78,11 +93,11 @@ macro_rules! read_socket {
 
 		match $socket.read(size_buffer.as_mut_slice()).await {
 			Ok(0) => {
-				log_error!("{}", MANGLE_DB_CLOSED);
+				error!("{}", MANGLE_DB_CLOSED);
 				return make_response!(ServerError, $conn_err_msg)
 			}
 			Err(e) => {
-				log_default_error!(e, "reading header from pipe");
+				default_error!(e, "reading header from pipe");
 				return make_response!(ServerError, $conn_err_msg)
 			}
 			Ok(_) => {}
@@ -95,14 +110,14 @@ macro_rules! read_socket {
 			if size > 0 {
 				match $socket.read_exact(buffer.as_mut_slice()).await {
 					Ok(0) => {
-						log_error!("{}", MANGLE_DB_CLOSED);
+						error!("{}", MANGLE_DB_CLOSED);
 						return make_response!(ServerError, $conn_err_msg)
 					}
 					Err(e) => {
 						if e.kind() == ErrorKind::BrokenPipe {
-							log_error!("{}", MANGLE_DB_CLOSED);
+							error!("{}", MANGLE_DB_CLOSED);
 						} else {
-							log_default_error!(e, "reading from local socket");
+							default_error!(e, "reading from local socket");
 						}
 						return make_response!(ServerError, $conn_err_msg)
 					}
@@ -139,6 +154,9 @@ macro_rules! make_response {
 	(BUG) => {
 		make_response!(NotFound, BUG_MESSAGE)
 	};
+	(BUG, either) => {
+		make_response!(NotFound, Either::Left(BUG_MESSAGE))
+	};
     ($code: expr, $reason: expr) => {
 		($code, $reason)
 	};
@@ -156,14 +174,14 @@ macro_rules! parse_header {
 		let header = match $buffer.remove(0) {
 			Some(x) => x,
 			None => {
-				log_error!("Empty response from db");
+				error!("Empty response from db");
 				return make_response!(ServerError, $err_msg);
 			}
 		};
 		match TryInto::<GatewayResponseHeader>::try_into(header) {
 			Ok(x) => x,
 			Err(_) => {
-				log_error!("Unrecognised header {header}");
+				error!("Unrecognised header {header}");
 				return make_response!(ServerError, $err_msg);
 			}
 		}
@@ -176,12 +194,12 @@ const SESSION_COOKIE_NAME: &str = "Session-ID";
 
 macro_rules! check_session_id {
     ($session: expr, $cookies: expr) => {
-		check_session_id!($session, $cookies, "The Session-ID is malformed", "The Session-ID is invalid or expired", "Missing Session-ID cookie")
+		check_session_id!($session, $cookies, "The Session-ID is malformed", "The Session-ID is invalid or expired")
 	};
     ($session: expr, $cookies: expr, either) => {
-		check_session_id!($session, $cookies, Either::Left("The Session-ID is malformed"), Either::Left("The Session-ID is invalid or expired"), Either::Left("Missing Session-ID cookie"))
+		check_session_id!($session, $cookies, Either::Left("The Session-ID is malformed"), Either::Left("The Session-ID is invalid or expired"))
 	};
-    ($session: expr, $cookies: expr, $err_msg1: expr, $err_msg2: expr, $err_msg3: expr) => {
+    ($session: expr, $cookies: expr, $err_msg1: expr, $err_msg2: expr) => {
 		if let Some(cookie) = $cookies.get(SESSION_COOKIE_NAME) {
 			let session_id = match SessionID::try_from(cookie.value().to_string()) {
 				Ok(x) => x,
@@ -190,24 +208,45 @@ macro_rules! check_session_id {
 			if !$session.is_valid_session(&session_id).await {
 				return make_response!(Status::Unauthorized, $err_msg2)
 			}
-			session_id
+			Some(session_id)
 		} else {
-			return make_response!(BadRequest, $err_msg3)
+			None
 		}
 	};
 }
 
+macro_rules! missing_session {
+    () => {
+		return make_response!(BadRequest, "Missing Session-ID cookie")
+	};
+    (either) => {
+		return make_response!(BadRequest, Either::Left("Missing Session-ID cookie"))
+	};
+}
+
+
 type Response = (Status, &'static str);
 
 
-#[get("/<path..>")]
-async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>, pipes: &PipeData, sessions: &SessionState) -> (Status, Either<&'static str, (ContentType, Vec<u8>)>) {
-	check_session_id!(sessions, cookies, either);
+#[rocket::get("/<path..>")]
+async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>, pipes: &PipeData, sessions: &SessionState, permissions: &PermissionsState) -> (Status, Either<&'static str, (ContentType, Vec<u8>)>) {
+	if let Some(session) = check_session_id!(sessions, cookies, either) {
+		if let Some(username) = sessions.get_session_owner(&session).await {
+			if !permissions.can_user_read_here(&username, &path) {
+				return make_response!(NotFound, Either::Left(RESOURCE_NOT_FOUND))
+			}
+		} else {
+			error!("No session owner but session-id was valid!");
+			return make_response!(BUG, either)
+		}
+	} else if !permissions.can_anonymous_read_here(&path) {
+		return make_response!(NotFound, Either::Left(RESOURCE_NOT_FOUND))
+	}
 
 	let mut socket = match pipes.take_pipe().await {
 		Ok(x) => x,
 		Err(e) => {
-			log_default_error!(e, "connecting to db");
+			default_error!(e, "connecting to db");
 			return make_response!(ServerError, Either::Left(DB_CONNECTION))
 		}
 	};
@@ -224,13 +263,13 @@ async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>, pipes: &PipeDat
 	match parse_header!(buffer, either) {
 		GatewayResponseHeader::Ok => {}
 		GatewayResponseHeader::InternalError => return make_response!(NotFound, Either::Left(BUG_MESSAGE)),
-		_ => return make_response!(NotFound, Either::Left("The requested resource could not be found")),
+		_ => return make_response!(NotFound, Either::Left(RESOURCE_NOT_FOUND)),
 	}
 
 	let mime_type = match buffer.deserialize_string() {
 		Ok(x) => x,
 		Err(e) => {
-			log_default_error!(e, "parsing mime type from db response");
+			default_error!(e, "parsing mime type from db response");
 			return make_response!(ServerError, Either::Left(BUG_MESSAGE))
 		}
 	};
@@ -238,13 +277,13 @@ async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>, pipes: &PipeDat
 	let payload_size: u32 = match buffer.deserialize_num() {
 		Ok(x) => x,
 		Err(e) => {
-			log_default_error!(e, "parsing payload size from db response");
+			default_error!(e, "parsing payload size from db response");
 			return make_response!(ServerError, Either::Left(BUG_MESSAGE))
 		}
 	};
 
 	if buffer.len() != payload_size as usize {
-		log_error!("Payload size mismatch:\n\texpected: {}\n\tactual: {}", payload_size, buffer.len());
+		error!("Payload size mismatch:\n\texpected: {}\n\tactual: {}", payload_size, buffer.len());
 		return make_response!(ServerError, Either::Left(BUG_MESSAGE))
 	}
 
@@ -252,7 +291,7 @@ async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>, pipes: &PipeDat
 		match ContentType::parse_flexible(mime_type.as_str()) {
 			Some(x) => x,
 			None => {
-				log_error!("Mime type from db is not valid: {}", mime_type);
+				error!("Mime type from db is not valid: {}", mime_type);
 				return make_response!(ServerError, Either::Left(BUG_MESSAGE))
 			}
 		},
@@ -261,13 +300,25 @@ async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>, pipes: &PipeDat
 }
 
 
-#[put("/<path..>", data = "<data>")]
-async fn put_resource(path: PathBuf, data: String, cookies: &CookieJar<'_>, pipes: &PipeData, sessions: &SessionState) -> Response {
-	check_session_id!(sessions, cookies);
+#[rocket::put("/<path..>", data = "<data>")]
+async fn put_resource(path: PathBuf, data: String, cookies: &CookieJar<'_>, pipes: &PipeData, sessions: &SessionState, permissions: &PermissionsState) -> Response {
+	if let Some(session) = check_session_id!(sessions, cookies) {
+		if let Some(username) = sessions.get_session_owner(&session).await {
+			if !permissions.can_user_write_here(&username, &path) {
+				return make_response!(NotFound, RESOURCE_NOT_FOUND)
+			}
+		} else {
+			error!("No session owner but session-id was valid!");
+			return make_response!(BUG)
+		}
+	} else {
+		missing_session!()
+	}
+
 	let mut socket = match pipes.take_pipe().await {
 		Ok(x) => x,
 		Err(e) => {
-			log_default_error!(e, "connecting to db");
+			default_error!(e, "connecting to db");
 			return make_response!(ServerError, DB_CONNECTION)
 		}
 	};
@@ -286,14 +337,14 @@ async fn put_resource(path: PathBuf, data: String, cookies: &CookieJar<'_>, pipe
 	match parse_header!(buffer) {
 		GatewayResponseHeader::Ok => make_response!(Ok, "Resource put successfully"),
 		GatewayResponseHeader::InternalError => make_response!(BUG),
-		GatewayResponseHeader::NotFound | GatewayResponseHeader::BadPath => make_response!(NotFound, "The given path could not be found"),
+		GatewayResponseHeader::NotFound | GatewayResponseHeader::BadPath => make_response!(NotFound, RESOURCE_NOT_FOUND),
 		GatewayResponseHeader::BadRequest => unreachable!(),
 		GatewayResponseHeader::BadResource => make_response!(BadRequest, "The given resource is not valid")
 	}
 }
 
 
-#[get("/users_with_password?<username>&<password>")]
+#[rocket::get("/users_with_password?<username>&<password>")]
 async fn get_session_with_password(username: String, password: String, cookies: &CookieJar<'_>, logins: &LoginState, sessions: &SessionState) -> Response {
 	match logins.try_login_password(&username, password).await {
 		LoginResult::Ok => {
@@ -315,7 +366,7 @@ async fn get_session_with_password(username: String, password: String, cookies: 
 }
 
 
-#[get("/users_with_key?<username>&<message>&<signature>")]
+#[rocket::get("/users_with_key?<username>&<message>&<signature>")]
 async fn get_session_with_key(username: String, message: String, signature: String, cookies: &CookieJar<'_>, logins: &LoginState, sessions: &SessionState) -> Response {
 	let signature = match signature.parse() {
 		Ok(x) => x,
@@ -341,15 +392,19 @@ async fn get_session_with_key(username: String, message: String, signature: Stri
 }
 
 
-#[put("/create_user_with_password?<username>&<password>")]
+#[rocket::put("/create_user_with_password?<username>&<password>")]
 async fn make_user(username: String, password: String, cookies: &CookieJar<'_>, logins: &LoginState, sessions: &SessionState, specials: &State<SpecialUsers>) -> Response {
-	let session_id = check_session_id!(sessions, cookies);
+	let session_id = match check_session_id!(sessions, cookies) {
+		Some(x) => x,
+		None => missing_session!()
+	};
+
 	match sessions.get_session_owner(&session_id).await {
 		Some(creator) => if !specials.can_user_create_user(&creator) {
 			return make_response!(Status::Unauthorized, "You are not authorized to create users")
 		}
 		None => {
-			log_error!("Session-ID was valid but not associated with a user!");
+			error!("Session-ID was valid but not associated with a user!");
 			return make_response!(BUG)
 		}
 	}
@@ -358,7 +413,7 @@ async fn make_user(username: String, password: String, cookies: &CookieJar<'_>, 
 		Ok(()) => make_response!(Ok, "User created successfully"),
 		Err(e) => match e {
 			UserCreationError::ArgonError(e) => {
-				log_default_error!(e, "generating password hash");
+				default_error!(e, "generating password hash");
 				make_response!(BUG)
 			},
 			UserCreationError::UsernameInUse => make_response!(BadRequest, "Username already in use"),
@@ -373,10 +428,10 @@ async fn make_user(username: String, password: String, cookies: &CookieJar<'_>, 
 async fn main() {
 	let config_path = ask_config_filename("Mangle Password Auth", "auth_config.toml");
 	info!("Using {} as a config file", config_path);
-	let configs = read_config_file(config_path);
+	let configs = read_config_file(config_path).await;
 
 	let mut users_file = unwrap_result_or_default_error!(
-		File::open(&configs.users_path),
+		File::open(configs.users_path),
 		"opening users file"
 	);
 
@@ -401,6 +456,7 @@ async fn main() {
 		}
 	};
 
+
 	let used_challenges = UsedChallenges::from_str(used_challenges.as_str()).unwrap().0;
 	let userdata: HashMap<String, UserCredentialData> = unwrap_result_or_default_error!(
 		simple_serde::toml::TOMLDeserialize::deserialize_toml(userdata),
@@ -412,25 +468,41 @@ async fn main() {
 
 	for (username, cred_data) in userdata {
 		if cred_data.privileges.is_empty() {
-			user_cred_map.insert(username, Credential::PasswordHash(cred_data.hash));
+			user_cred_map.insert(username, cred_data.cred);
 		} else {
-			user_cred_map.insert(username.clone(), Credential::PasswordHash(cred_data.hash));
+			user_cred_map.insert(username.clone(), cred_data.cred);
 			privileged.insert(username, cred_data.privileges);
 		}
 	}
 
+	let mut permissions_file = unwrap_result_or_default_error!(
+		File::open(configs.permissions_path),
+		"opening permissions file"
+	);
+
+	let mut permissions_data = String::new();
+	unwrap_result_or_default_error!(
+		permissions_file.read_to_string(&mut permissions_data),
+		"reading permissions file"
+	);
+	drop(permissions_file);
+
+	let mut permissions = unwrap_result_or_default_error!(
+		PermissionsDeser::deserialize_mlist(permissions_data),
+		"parsing permissions file"
+	);
+
 	// info!("Binding to {bind_addr} on {}", &configs.mount_point);
 
-	setup_logger_file(configs.log_path);
-
-	info!("Listener spinning up!");
+	STDERR.init_stderr().await;
+	LOG.open_log_file(configs.log_path).await.expect("Error opening log file");
 
 	let (ready_tx, ready_rx) = async_std::channel::unbounded::<()>();
 
 	select! {
 		// server
 		res = rocket::build()
-			.mount(configs.mount_point, routes![
+			.mount(configs.mount_point, rocket::routes![
 				get_session_with_password,
 				get_session_with_key,
 				borrow_resource,
@@ -438,8 +510,8 @@ async fn main() {
 				make_user
 			])
 			.attach(AdHoc::on_liftoff("notify_liftoff", |_| Box::pin(async move {
-				log_info!("Listener started up!");
-				info!("Listener started up!");
+				warn!("Listener started up!");
+				STDERR.log_auto_colored("Listener started up!", LogLevel::Warn).await;
 				drop(ready_tx);
 			})))
 			.attach(Compression::fairing())
@@ -457,10 +529,21 @@ async fn main() {
 			.manage(Sessions::new(Duration::from_secs(configs.max_session_duration), configs.cleanup_delay))
 			.manage(Pipes::new(configs.suffix, configs.cleanup_delay))
 			.manage(SpecialUsers::new(privileged))
+			.manage(Permissions::new(
+				permissions.get_public_read_paths(),
+				permissions.get_all_users_read_paths(),
+				permissions.get_all_users_write_paths(),
+				unwrap_option_or_msg!(
+					permissions.get_user_home_parent(),
+					"UserHomeParent was not configured"
+				),
+				permissions.get_users_read_paths(),
+				permissions.get_users_write_paths(),
+			))
 			.launch() => {
 			if let Err(e) = res {
-				log_default_error!(e, "serving http");
 				println!();
+				STDERR.log_auto_colored(format!("error serving http: {e:?}").as_str(), LogLevel::Error).await;
 				default_error!(e, "serving http");
 			}
 			println!();
@@ -481,7 +564,7 @@ async fn main() {
 				match stdin.read_line(&mut line).await {
 					Ok(_) => {},
 					Err(e) => {
-						default_error!(e, "reading stdin");
+						STDERR.log_auto_colored(format!("error reading stdin: {e:?}").as_str(), LogLevel::Error).await;
 						continue;
 					}
 				}
@@ -507,6 +590,6 @@ async fn main() {
 	}
 	;
 
-	warn!("Exit Successful!");
-	log_info!("Listener exited!");
+	STDERR.log_auto_colored("Exit Successful", LogLevel::Warn).await;
+	warn!("Exit Successful");
 }
