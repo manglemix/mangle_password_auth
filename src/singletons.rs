@@ -11,6 +11,7 @@ use mangle_db_enums::MANGLE_DB_SUFFIX;
 use mangle_rust_utils::NestedMap;
 use rand::{CryptoRng, Rng, RngCore, thread_rng};
 use rand::distributions::Alphanumeric;
+use regex::Regex;
 use tokio::spawn;
 use tokio::time::sleep;
 
@@ -18,6 +19,9 @@ use tokio::time::sleep;
 use windows::*;
 
 use crate::*;
+
+
+declare_logger!(pub FAILED_LOGINS, File, 0, );
 
 
 #[cfg(windows)]
@@ -123,7 +127,8 @@ pub struct Logins {
 	argon2_config: ArgonConfig<'static>,
 	salt_len: u8,
 	min_username_len: u8,
-	max_username_len: u8
+	max_username_len: u8,
+	password_regex: Option<Regex>
 }
 
 
@@ -150,8 +155,10 @@ pub struct Permissions {
 	public_read_paths: NestedMap<String, ()>,
 	user_read_paths: HashMap<String, NestedMap<String, ()>>,
 	user_write_paths: HashMap<String, NestedMap<String, ()>>,
-	all_user_read_paths: NestedMap<String, ()>,
-	all_user_write_paths: NestedMap<String, ()>,
+	all_user_home_read_paths: NestedMap<String, ()>,
+	all_user_home_write_paths: NestedMap<String, ()>,
+	all_user_extern_read_paths: NestedMap<String, ()>,
+	all_user_extern_write_paths: NestedMap<String, ()>,
 	user_home_parent: Vec<String>,
 	user_home_parent_segment_count: usize,
 }
@@ -174,7 +181,8 @@ impl Logins {
 		salt_len: u8,
 		min_username_len: u8,
 		max_username_len: u8,
-		cleanup_delay: u32
+		cleanup_delay: u32,
+		password_regex: Option<Regex>
 	) -> Arc<Self> {
 		if max_username_len < min_username_len {
 			panic!("max_username_len is smaller than min_username_len!")
@@ -190,7 +198,8 @@ impl Logins {
 			argon2_config: ArgonConfig::default(),
 			salt_len,
 			min_username_len,
-			max_username_len
+			max_username_len,
+			password_regex
 		});
 
 		let out_clone = out.clone();
@@ -218,6 +227,11 @@ impl Logins {
 	pub async fn add_user(&self, username: String, password: String) -> Result<(), UserCreationError> {
 		if username.len() < self.min_username_len as usize || username.len() > self.max_username_len as usize || !username.chars().all(char::is_alphanumeric) {
 			return Err(UserCreationError::BadUsername)
+		}
+		if let Some(re) = &self.password_regex {
+			if !re.is_match(password.as_str()) {
+				return Err(UserCreationError::BadPassword)
+			}
 		}
 		let reader = self.user_cred_map.upgradable_read().await;
 		if reader.contains_key(&username) {
@@ -276,7 +290,9 @@ impl Logins {
 					if let Some(fail) = writer.get_mut(username) {
 						fail.running_count += 1;
 						fail.time = Instant::now();
-						// TODO Log brute force
+						if fail.running_count == self.max_fails {
+							FAILED_LOGINS.warn(format!("{} failed to login too many times", username)).await
+						}
 					} else {
 						writer.insert(username.clone(), FailedLoginAttempt {
 							running_count: 1,
@@ -481,8 +497,10 @@ impl Pipes {
 impl Permissions {
 	pub fn new(
 		public_read_paths: NestedMap<String, ()>,
-		all_user_read_paths: NestedMap<String, ()>,
-		all_user_write_paths: NestedMap<String, ()>,
+		all_user_home_read_paths: NestedMap<String, ()>,
+		all_user_home_write_paths: NestedMap<String, ()>,
+		all_user_extern_read_paths: NestedMap<String, ()>,
+		all_user_extern_write_paths: NestedMap<String, ()>,
 		user_home_parent: Vec<String>,
 		user_read_paths: HashMap<String, NestedMap<String, ()>>,
 		user_write_paths: HashMap<String, NestedMap<String, ()>>,
@@ -491,8 +509,10 @@ impl Permissions {
 			public_read_paths,
 			user_read_paths,
 			user_write_paths,
-			all_user_read_paths,
-			all_user_write_paths,
+			all_user_home_read_paths,
+			all_user_home_write_paths,
+			all_user_extern_read_paths,
+			all_user_extern_write_paths,
 			user_home_parent_segment_count: user_home_parent.len(),
 			user_home_parent,
 		}
@@ -511,10 +531,14 @@ impl Permissions {
 					return false
 				}
 				segments.drain(0..(self.user_home_parent_segment_count + 1));
-				self.all_user_write_paths.partial_contains(segments)
+				self.all_user_home_write_paths.partial_contains(segments)
 			} else {
 				false
 			}
+
+		} else if self.all_user_extern_write_paths.partial_contains(segments.clone()) {
+			return true
+
 		} else {
 			match self.user_write_paths.get(username) {
 				None => false,
@@ -536,10 +560,14 @@ impl Permissions {
 					return false
 				}
 				segments.drain(0..(self.user_home_parent_segment_count + 1));
-				self.all_user_read_paths.partial_contains(segments)
+				self.all_user_home_read_paths.partial_contains(segments)
 			} else {
 				false
 			}
+
+		} else if self.all_user_extern_read_paths.partial_contains(segments.clone()) {
+			return true
+
 		} else {
 			match self.user_read_paths.get(username) {
 				None => false,

@@ -23,7 +23,9 @@ pub struct Configs {
 	pub min_username_len: u8,
 	pub max_username_len: u8,
 	pub cleanup_delay: u32,
-	pub permissions_path: String
+	pub permissions_path: String,
+	pub password_regex: Option<String>,
+	pub failed_logins_path: String
 }
 
 
@@ -44,7 +46,9 @@ impl Deserialize<ReadableProfile> for Configs {
 			min_username_len: data.deserialize_key_or("min_username_len", 8)?,
 			max_username_len: data.deserialize_key_or("max_username_len", 16)?,
 			cleanup_delay: data.deserialize_key_or("cleanup_delay", 7200u32)?,
-			permissions_path: data.deserialize_key_or("permissions_path", "permissions.mlist")?
+			permissions_path: data.deserialize_key_or("permissions_path", "permissions.mlist")?,
+			password_regex: data.deserialize_key_opt("password_regex")?,
+			failed_logins_path: data.deserialize_key_or("failed_logins_path", "failed_logins.log")?
 		})
 	}
 }

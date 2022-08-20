@@ -10,14 +10,10 @@ use mangle_rust_utils::NestedMap;
 use std::mem::take;
 use async_std::task::block_on;
 use ed25519_dalek::{PUBLIC_KEY_LENGTH, PublicKey};
-use crate::{Credential, path_buf_to_segments, STDERR};
+use crate::*;
 
 use crate::singletons::Privilege;
 use simple_serde::mlist_prelude::*;
-use simple_logger::define_error;
-
-
-define_error!(STDERR);
 
 
 impl Serialize<ReadableProfile> for Privilege {
@@ -124,12 +120,20 @@ impl PermissionsDeser {
 		Self::arr_to_map(self.0.remove("PublicRead"))
 	}
 
-	pub fn get_all_users_read_paths(&mut self) -> NestedMap<String, ()> {
-		Self::arr_to_map(self.0.remove("AllUsersRead"))
+	pub fn get_all_users_home_read_paths(&mut self) -> NestedMap<String, ()> {
+		Self::arr_to_map(self.0.remove("AllUsersHomeRead"))
 	}
 
-	pub fn get_all_users_write_paths(&mut self) -> NestedMap<String, ()> {
-		Self::arr_to_map(self.0.remove("AllUsersWrite"))
+	pub fn get_all_users_home_write_paths(&mut self) -> NestedMap<String, ()> {
+		Self::arr_to_map(self.0.remove("AllUsersHomeWrite"))
+	}
+
+	pub fn get_all_users_extern_read_paths(&mut self) -> NestedMap<String, ()> {
+		Self::arr_to_map(self.0.remove("AllUsersExternRead"))
+	}
+
+	pub fn get_all_users_extern_write_paths(&mut self) -> NestedMap<String, ()> {
+		Self::arr_to_map(self.0.remove("AllUsersExternWrite"))
 	}
 
 	pub fn get_users_read_paths(&mut self) -> HashMap<String, NestedMap<String, ()>> {
