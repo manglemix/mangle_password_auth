@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::mem::replace;
 use std::ops::DerefMut;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,7 +20,6 @@ use tokio::time::sleep;
 use windows::*;
 
 use crate::*;
-
 
 declare_logger!(pub FAILED_LOGINS, File, 0, );
 
@@ -535,10 +535,8 @@ impl Permissions {
 			} else {
 				false
 			}
-
 		} else if self.all_user_extern_write_paths.partial_contains(segments.clone()) {
 			return true
-
 		} else {
 			match self.user_write_paths.get(username) {
 				None => false,
@@ -564,10 +562,8 @@ impl Permissions {
 			} else {
 				false
 			}
-
 		} else if self.all_user_extern_read_paths.partial_contains(segments.clone()) {
 			return true
-
 		} else {
 			match self.user_read_paths.get(username) {
 				None => false,

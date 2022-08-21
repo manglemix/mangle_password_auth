@@ -1,12 +1,9 @@
 use async_std::fs::File;
 use async_std::io::ReadExt;
-use async_std::path::{Path};
-
+use async_std::path::Path;
 use simple_serde::{mlist_prelude::*, prelude::*, toml_prelude::*};
 
-use crate::{LOG};
 use super::*;
-
 
 pub struct Configs {
 	pub suffix: String,

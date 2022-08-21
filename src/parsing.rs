@@ -2,19 +2,18 @@ use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs::File;
 use std::io::Read;
+use std::mem::take;
+use std::path::PathBuf;
 use std::str::FromStr;
 
-use simple_serde::{DeserializationError, DeserializationErrorKind, Deserialize, ReadableProfile, Serialize, Serializer};
-use std::path::{PathBuf};
-use mangle_rust_utils::NestedMap;
-use std::mem::take;
 use async_std::task::block_on;
 use ed25519_dalek::{PUBLIC_KEY_LENGTH, PublicKey};
-use crate::*;
-
-use crate::singletons::Privilege;
+use mangle_rust_utils::NestedMap;
+use simple_serde::{DeserializationError, DeserializationErrorKind, Deserialize, ReadableProfile, Serialize, Serializer};
 use simple_serde::mlist_prelude::*;
 
+use crate::*;
+use crate::singletons::Privilege;
 
 impl Serialize<ReadableProfile> for Privilege {
 	fn serialize<T: Serializer>(self, data: &mut T) {
@@ -168,12 +167,12 @@ impl PermissionsDeser {
 
 	pub fn get_user_home_parent(&mut self) -> Option<Vec<String>> {
 		self.0.remove("UserHomeParent").map(|mut x| {
-				if x.len() != 1 {
-					block_on(async { error!("UserHomeParent can only have 1 path") });
-					bad_exit!();
-				}
-				let path = x.pop().unwrap();
-				path.components().map(|x| x.as_os_str().to_str().map(|x| x.to_string())).flatten().collect()
+			if x.len() != 1 {
+				block_on(async { error!("UserHomeParent can only have 1 path") });
+				bad_exit!();
+			}
+			let path = x.pop().unwrap();
+			path.components().map(|x| x.as_os_str().to_str().map(|x| x.to_string())).flatten().collect()
 		})
 	}
 }
