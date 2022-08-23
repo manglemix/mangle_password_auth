@@ -1,7 +1,6 @@
-use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use mangle_db_enums::{GatewayRequestHeader, GatewayResponseHeader};
+use mangle_db_enums::{GatewayRequestHeader, GatewayResponseHeader, Message};
 use rocket::Either;
 use rocket::http::{ContentType, CookieJar};
 use simple_serde::{DeserializationErrorKind, PrimitiveSerializer};
@@ -23,25 +22,29 @@ pub(crate) async fn directory_tools(root_path: PathBuf, cookies: &CookieJar<'_>,
 				}
 			}
 
-			let mut socket = take_pipe!(globals);
+			let mut socket = take_pipe!(globals, either);
 
-			let mut payload = vec![GatewayRequestHeader::ListDirectory.into()];
+			write_socket!(
+				socket,
+				Message::new_request(
+					GatewayRequestHeader::ListDirectory,
+					root_path.to_str().unwrap().as_bytes().to_vec()
+				).unwrap(),
+				either
+			);
 
-			payload.append(&mut root_path.to_str().unwrap().as_bytes().to_vec());
-
-			write_socket!(socket, payload.as_slice(), either);
-
-			let mut buffer: VecDeque<_> = read_socket!(socket, either).into();
+			let message = read_socket!(socket, either);
 
 			globals.pipes.return_pipe(socket).await;
 
-			match parse_header!(buffer, either) {
+			match message.header {
 				GatewayResponseHeader::Ok => {}
 				GatewayResponseHeader::InternalError => return make_response!(BUG, either),
 				GatewayResponseHeader::IsDirectoryError => return make_response!(BadRequest, Either::Left("The given path is not a directory")),
 				_ => return make_response!(NotFound, Either::Left(RESOURCE_NOT_FOUND))
 			}
 
+			let mut buffer = message.body.unwrap_or_default();
 			let mut paths = String::new();
 
 			loop {
@@ -94,22 +97,28 @@ pub(crate) async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>, glob
 		return make_response!(NotFound, Either::Left(RESOURCE_NOT_FOUND))
 	}
 
-	let mut socket = take_pipe!(globals);
+	let mut socket = take_pipe!(globals, either);
 
-	let mut payload = vec![GatewayRequestHeader::BorrowResource.into()];
-	payload.append(&mut path.to_str().unwrap().as_bytes().to_vec());
+	write_socket!(
+		socket,
+		Message::new_request(
+			GatewayRequestHeader::BorrowResource,
+			path.to_str().unwrap().as_bytes().to_vec()
+		).unwrap(),
+		either
+	);
 
-	write_socket!(socket, payload.as_slice(), either);
-
-	let mut buffer: VecDeque<_> = read_socket!(socket, either).into();
+	let message = read_socket!(socket, either);
 
 	globals.pipes.return_pipe(socket).await;
 
-	match parse_header!(buffer, either) {
+	match message.header {
 		GatewayResponseHeader::Ok => {}
 		GatewayResponseHeader::InternalError => return make_response!(BUG, either),
 		_ => return make_response!(NotFound, Either::Left(RESOURCE_NOT_FOUND)),
 	}
+
+	let mut buffer = message.body.unwrap_or_default();
 
 	let mime_type = match buffer.deserialize_string() {
 		Ok(x) => x,
@@ -118,19 +127,6 @@ pub(crate) async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>, glob
 			return make_response!(ServerError, Either::Left(BUG_MESSAGE))
 		}
 	};
-
-	// let payload_size: u32 = match buffer.deserialize_num() {
-	// 	Ok(x) => x,
-	// 	Err(e) => {
-	// 		default_error!(e, "parsing payload size from db response");
-	// 		return make_response!(ServerError, Either::Left(BUG_MESSAGE))
-	// 	}
-	// };
-	//
-	// if buffer.len() != payload_size as usize {
-	// 	error!("Payload size mismatch:\n\texpected: {}\n\tactual: {}", payload_size, buffer.len());
-	// 	return make_response!(ServerError, Either::Left(BUG_MESSAGE))
-	// }
 
 	(Status::Ok, Either::Right((
 		match ContentType::parse_flexible(mime_type.as_str()) {

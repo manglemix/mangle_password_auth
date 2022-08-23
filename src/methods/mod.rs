@@ -25,77 +25,71 @@ macro_rules! write_socket {
 		write_socket!($socket, $payload, rocket::Either::Left(DB_CONNECTION))
 	};
     ($socket: expr, $payload: expr, $server_err_msg: expr) => {
-		match $socket.write_all($payload).await {
-		Ok(_) => {}
-		Err(e) => {
-			use $crate::*;
-			if e.kind() == std::io::ErrorKind::BrokenPipe {
-				error!("{}", $crate::methods::MANGLE_DB_CLOSED);
-			} else {
-				default_error!(e, "reading from local socket");
+		match $socket.write_all($payload.to_bytes().as_slice()).await {
+			Ok(_) => {}
+			Err(e) => {
+				use $crate::*;
+				default_error!(e, "writing to socket");
+				return make_response!(ServerError, $server_err_msg);
 			}
-			return make_response!(ServerError, $server_err_msg);
 		}
-	}};
+	};
 }
 macro_rules! read_socket {
 	($socket: expr) => {
-		read_socket!($socket, $crate::methods::DB_CONNECTION)
+		read_socket!($socket, $crate::methods::DB_CONNECTION, $crate::methods::BUG_MESSAGE)
 	};
-    ($socket: expr, either) => {
-		read_socket!($socket, rocket::Either::Left(DB_CONNECTION))
+	($socket: expr, either) => {
+		read_socket!($socket, rocket::Either::Left($crate::methods::DB_CONNECTION), rocket::Either::Left($crate::methods::BUG_MESSAGE))
 	};
-    ($socket: expr, $conn_err_msg: expr) => {{
-		let mut size_buffer = [0u8; 5];
+    ($socket: expr, $conn_err_msg: expr, $header_err_msg: expr) => {{
+		let mut header_and_size = [0; 5];
 
-		match $socket.read(size_buffer.as_mut_slice()).await {
+		match $socket.read_exact(header_and_size.as_mut_slice()).await {
 			Ok(0) => {
-				use $crate::*;
+				use crate::*;
 				error!("{}", $crate::methods::MANGLE_DB_CLOSED);
 				return make_response!(ServerError, $conn_err_msg)
 			}
+			Ok(_) => {}
 			Err(e) => {
-				default_error!(e, "reading header from pipe");
+				default_error!(e, "listening to stream");
 				return make_response!(ServerError, $conn_err_msg)
 			}
-			Ok(_) => {}
-			// Ok(1) | Ok(5) => {}
-			// Ok(mut n) => {
-			// 	while n < 5 {
-			//
-			// 	}
-			// }
 		}
 
-		let mut buffer;
-		if size_buffer[0] == 0 {
-			let size = u32::from_be_bytes([size_buffer[1], size_buffer[2], size_buffer[3], size_buffer[4]]) as usize;
-			buffer = vec![0; size];
-			if size > 0 {
-				match $socket.read_exact(buffer.as_mut_slice()).await {
-					Ok(0) => {
-						use $crate::*;
-						error!("{}", $crate::methods::MANGLE_DB_CLOSED);
-						return make_response!(ServerError, $conn_err_msg)
-					}
-					Err(e) => {
-						if e.kind() == std::io::ErrorKind::BrokenPipe {
-							use $crate::*;
-							error!("{}", $crate::methods::MANGLE_DB_CLOSED);
-						} else {
-							default_error!(e, "reading from local socket");
-						}
-						return make_response!(ServerError, $conn_err_msg)
-					}
-					_ => {}
+		let body_size = u32::from_be_bytes([header_and_size[0], header_and_size[1], header_and_size[2], header_and_size[3]]);
+		let mut data = vec![0; body_size as usize];
+
+		if body_size > 0 {
+			match $socket.read_exact(data.as_mut_slice()).await {
+				Ok(0) => {
+					use crate::*;
+					error!("{}", $crate::methods::MANGLE_DB_CLOSED);
+					return make_response!(ServerError, $conn_err_msg)
+				}
+				Ok(_) => {}
+				Err(e) => {
+					default_error!(e, "listening to stream");
+					return make_response!(ServerError, $conn_err_msg)
 				}
 			}
-			buffer.insert(0, 0);
-
+			match mangle_db_enums::Message::new_response(header_and_size[0], data) {
+				Ok(x) => x,
+				Err(_) => {
+					error!("unrecognized_header: {}", header_and_size[0]);
+					return make_response!(ServerError, $header_err_msg)
+				}
+			}
 		} else {
-			buffer = vec![size_buffer[0]];
+			match mangle_db_enums::Message::new_response_header(header_and_size[0]) {
+				Ok(x) => x,
+				Err(_) => {
+					error!("unrecognized_header: {}", header_and_size[0]);
+					return make_response!(ServerError, $header_err_msg)
+				}
+			}
 		}
-		buffer
 	}};
 }
 macro_rules! make_response {
@@ -121,32 +115,32 @@ macro_rules! make_response {
 		($code, $reason)
 	};
 }
-macro_rules! parse_header {
-    ($buffer: expr) => {
-		parse_header!($buffer, $crate::methods::BUG_MESSAGE)
-	};
-    ($buffer: expr, either) => {
-		parse_header!($buffer, rocket::Either::Left(BUG_MESSAGE))
-	};
-    ($buffer: expr, $err_msg: expr) => {{
-		let header = match $buffer.remove(0) {
-			Some(x) => x,
-			None => {
-				use $crate::*;
-				error!("Empty response from db");
-				return make_response!(ServerError, $err_msg);
-			}
-		};
-		match TryInto::<GatewayResponseHeader>::try_into(header) {
-			Ok(x) => x,
-			Err(_) => {
-				use $crate::*;
-				error!("Unrecognised header {header}");
-				return make_response!(ServerError, $err_msg);
-			}
-		}
-	}};
-}
+// macro_rules! parse_header {
+//     ($buffer: expr) => {
+// 		parse_header!($buffer, $crate::methods::BUG_MESSAGE)
+// 	};
+//     ($buffer: expr, either) => {
+// 		parse_header!($buffer, rocket::Either::Left(BUG_MESSAGE))
+// 	};
+//     ($buffer: expr, $err_msg: expr) => {{
+// 		let header = match $buffer.remove(0) {
+// 			Some(x) => x,
+// 			None => {
+// 				use $crate::*;
+// 				error!("Empty response from db");
+// 				return make_response!(ServerError, $err_msg);
+// 			}
+// 		};
+// 		match TryInto::<GatewayResponseHeader>::try_into(header) {
+// 			Ok(x) => x,
+// 			Err(_) => {
+// 				use $crate::*;
+// 				error!("Unrecognised header {header}");
+// 				return make_response!(ServerError, $err_msg);
+// 			}
+// 		}
+// 	}};
+// }
 macro_rules! check_session_id {
     ($session: expr, $cookies: expr) => {
 		check_session_id!($session, $cookies, "The Session-ID is malformed", "The Session-ID is invalid or expired")
@@ -183,6 +177,15 @@ macro_rules! take_pipe {
 			Ok(x) => x,
 			Err(e) => {
 				default_error!(e, "connecting to db");
+				return make_response!(ServerError, DB_CONNECTION)
+			}
+		}
+	};
+    ($globals: expr, either) => {
+		match $globals.pipes.take_pipe().await {
+			Ok(x) => x,
+			Err(e) => {
+				default_error!(e, "connecting to db");
 				return make_response!(ServerError, Either::Left(DB_CONNECTION))
 			}
 		}
@@ -192,7 +195,7 @@ macro_rules! take_pipe {
 use check_session_id;
 use make_response;
 use missing_session;
-use parse_header;
+// use parse_header;
 use read_socket;
 use write_socket;
 use take_pipe;
