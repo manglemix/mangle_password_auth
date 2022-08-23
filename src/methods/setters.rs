@@ -48,8 +48,8 @@ pub(crate) async fn put_resource(path: PathBuf, data: String, cookies: &CookieJa
 		GatewayResponseHeader::Ok => make_response!(Ok, "Resource put successfully"),
 		GatewayResponseHeader::InternalError => make_response!(BUG),
 		GatewayResponseHeader::NotFound | GatewayResponseHeader::BadPath => make_response!(NotFound, RESOURCE_NOT_FOUND),
-		GatewayResponseHeader::BadRequest => unreachable!(),
-		GatewayResponseHeader::BadResource => make_response!(BadRequest, "The given resource is not valid")
+		GatewayResponseHeader::BadResource => make_response!(BadRequest, "The given resource is not valid"),
+		_ => unreachable!()
 	}
 }
 

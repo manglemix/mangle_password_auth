@@ -7,7 +7,6 @@ extern crate rocket;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Error as IOError, ErrorKind, Read};
-use std::ops::Deref;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -24,7 +23,7 @@ use tokio::select;
 
 use configs::read_config_file;
 use methods::auth::{get_session_with_key, get_session_with_password, make_user};
-use methods::getters::borrow_resource;
+use methods::getters::{borrow_resource, directory_tools};
 use methods::setters::{post_data, put_resource};
 use parsing::PermissionsDeser;
 use parsing::{UsedChallenges, UserCredentialData};
@@ -36,7 +35,7 @@ mod parsing;
 
 
 declare_logger!(pub LOG, EitherFileOrStderr, 0, );
-define_error!(crate::LOG, export);
+define_error!(crate::LOG, trace, export);
 define_info!(crate::LOG, export);
 define_warn!(crate::LOG, export);
 
@@ -127,6 +126,7 @@ async fn main() {
 			.mount(configs.mount_point, rocket::routes![
 				get_session_with_password,
 				get_session_with_key,
+				directory_tools,
 				borrow_resource,
 				put_resource,
 				make_user,

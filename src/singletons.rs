@@ -140,7 +140,7 @@ pub struct SpecialUsers {
 pub struct Sessions {
 	user_session_map: RwLock<HashMap<String, Arc<SessionID>>>,
 	session_user_map: RwLock<HashMap<Arc<SessionID>, String>>,
-	sessions: RwLock<HashMap<SessionID, SessionData>>,
+	sessions: RwLock<HashMap<Arc<SessionID>, SessionData>>,
 	pub(crate) max_session_duration: Duration
 }
 
@@ -402,9 +402,9 @@ impl Sessions {
 
 		out
 	}
-	pub async fn create_session(&self, username: String) -> SessionID {
+	pub async fn create_session(&self, username: String) -> Arc<SessionID> {
 		if let Some(x) = self.user_session_map.read().await.get(&username) {
-			return x.deref().clone()
+			return x.clone()
 		}
 
 		let mut writer = self.sessions.write().await;
@@ -419,17 +419,17 @@ impl Sessions {
 			}
 		}
 
-		writer.insert(session_id.clone(), SessionData {
+		let arc_session_id = Arc::new(session_id);
+		writer.insert(arc_session_id.clone(), SessionData {
 			creation_time: Instant::now(),
 			owning_user: username.clone()
 		});
 		drop(writer);
 
-		let arc_session_id = Arc::new(session_id.clone());
 		self.user_session_map.write().await.insert(username.clone(), arc_session_id.clone());
-		self.session_user_map.write().await.insert(arc_session_id, username);
+		self.session_user_map.write().await.insert(arc_session_id.clone(), username);
 
-		session_id
+		arc_session_id
 	}
 
 	pub async fn prune_expired(&self) {

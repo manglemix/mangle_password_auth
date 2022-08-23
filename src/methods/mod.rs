@@ -3,13 +3,6 @@ use std::sync::Arc;
 use rocket::http::Status;
 use rocket::State;
 
-use check_session_id;
-use make_response;
-use missing_session;
-use parse_header;
-use read_socket;
-use write_socket;
-
 use crate::singletons::{Logins, Permissions, Pipes, Sessions, SpecialUsers};
 
 pub(super) mod auth;
@@ -184,6 +177,26 @@ macro_rules! missing_session {
 		return make_response!(BadRequest, rocket::Either::Left("Missing Session-ID cookie"))
 	};
 }
+macro_rules! take_pipe {
+    ($globals: expr) => {
+		match $globals.pipes.take_pipe().await {
+			Ok(x) => x,
+			Err(e) => {
+				default_error!(e, "connecting to db");
+				return make_response!(ServerError, Either::Left(DB_CONNECTION))
+			}
+		}
+	};
+}
+
+use check_session_id;
+use make_response;
+use missing_session;
+use parse_header;
+use read_socket;
+use write_socket;
+use take_pipe;
+
 type Response = (Status, &'static str);
 
 
