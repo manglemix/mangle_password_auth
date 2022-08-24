@@ -258,15 +258,17 @@ impl Logins {
 		{
 			let reader = self.failed_logins.read().await;
 
-			if let Some(x) = reader.get(username) {
-				if x.running_count >= self.max_fails {
-					if x.time.elapsed() < self.lockout_time {
+			if let Some(fail) = reader.get(username) {
+				if fail.running_count >= self.max_fails {
+					if fail.time.elapsed() <= self.lockout_time {
 						return LoginResult::LockedOut
 					} else {
 						drop(reader);
 						let mut writer = self.failed_logins.write().await;
 						writer.remove(username);
 					}
+				} else if fail.time.elapsed() > self.lockout_time {
+					self.failed_logins.write().await.remove(username);
 				}
 			}
 		}
@@ -291,7 +293,7 @@ impl Logins {
 						fail.running_count += 1;
 						fail.time = Instant::now();
 						if fail.running_count == self.max_fails {
-							FAILED_LOGINS.warn(format!("{} failed to login too many times", username)).await
+							FAILED_LOGINS.warn(username).await
 						}
 					} else {
 						writer.insert(username.clone(), FailedLoginAttempt {
