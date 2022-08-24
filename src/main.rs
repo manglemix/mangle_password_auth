@@ -160,7 +160,7 @@ async fn main() {
 						configs.password_regex.map(|x| { block_on(async move { unwrap_result_or_default_error!(Regex::new(x.as_str()), "parsing password regex") }) })
 					),
 					sessions: Sessions::new(Duration::from_secs(configs.max_session_duration), configs.cleanup_delay),
-					pipes: Pipes::new(configs.suffix, configs.cleanup_delay),
+					pipes: Pipes::new(configs.suffix, configs.cleanup_delay, true),
 					special_users: SpecialUsers::new(privileged),
 					permissions: Permissions::new(
 						permissions.get_public_read_paths(),
@@ -199,6 +199,7 @@ async fn main() {
 
 				let mut line = vec![0; 1024];
 				match stdin.read(&mut line).await {
+					Ok(0) => return,
 					Ok(n) => line.split_off(n),
 					Err(_) => continue
 				};

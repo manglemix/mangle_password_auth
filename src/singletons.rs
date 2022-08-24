@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::mem::replace;
 use std::ops::DerefMut;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,54 +16,18 @@ use regex::Regex;
 use tokio::spawn;
 use tokio::time::sleep;
 use std::sync::{Mutex, RwLock};
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
 
 #[cfg(windows)]
-use windows::*;
+use tokio::net::windows::named_pipe::{NamedPipeClient as LocalPipe};
+// use windows::LocalPipe;
+
 
 use crate::*;
 
 declare_logger!(pub FAILED_LOGINS, File, 0, );
-
-
-#[cfg(windows)]
-mod windows {
-	use std::pin::Pin;
-	use std::task::{Context, Poll};
-
-	use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-	use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
-
-	use super::IOError;
-
-	pub struct BiPipe(Pin<Box<NamedPipeClient>>);
-
-	impl BiPipe {
-		pub fn connect(to: &str) -> Result<Self, IOError> {
-			ClientOptions::new()
-				.open(r"\\.\pipe\".to_string() + to).map(|x| Self(Box::pin(x)))
-		}
-	}
-
-	impl AsyncRead for BiPipe {
-		fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
-			self.0.as_mut().poll_read(cx, buf)
-		}
-	}
-
-	impl AsyncWrite for BiPipe {
-		fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, IOError>> {
-			self.0.as_mut().poll_write(cx, buf)
-		}
-
-		fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IOError>> {
-			self.0.as_mut().poll_flush(cx)
-		}
-
-		fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IOError>> {
-			self.0.as_mut().poll_shutdown(cx)
-		}
-	}
-}
 
 pub enum Credential {
 	PasswordHash(String),
@@ -145,9 +110,62 @@ pub struct Sessions {
 }
 
 
+pub enum EitherPipe {
+	Local(Pin<Box<LocalPipe>>),
+	Network(Pin<Box<TcpStream>>)
+}
+
+
+impl EitherPipe {
+	fn connect_local(to: &str) -> Result<Self, IOError> {
+		#[cfg(windows)]
+		tokio::net::windows::named_pipe::ClientOptions::new()
+			.open(r"\\.\pipe\".to_string() + to).map(|x| Self::Local(Box::pin(x)))
+	}
+	async fn connect_remote(to: &str) -> Result<Self, IOError> {
+		TcpStream::connect(to).await.map(|x| EitherPipe::Network(Box::pin(x)))
+	}
+}
+
+
+impl AsyncRead for EitherPipe {
+	fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+		match self.get_mut() {
+			EitherPipe::Local(x) => x.as_mut().poll_read(cx, buf),
+			EitherPipe::Network(x) => x.as_mut().poll_read(cx, buf)
+		}
+	}
+}
+
+
+impl AsyncWrite for EitherPipe {
+	fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, IOError>> {
+		match self.get_mut() {
+			EitherPipe::Local(x) => x.as_mut().poll_write(cx, buf),
+			EitherPipe::Network(x) => x.as_mut().poll_write(cx, buf)
+		}
+	}
+
+	fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IOError>> {
+		match self.get_mut() {
+			EitherPipe::Local(x) => x.as_mut().poll_flush(cx),
+			EitherPipe::Network(x) => x.as_mut().poll_flush(cx)
+		}
+	}
+
+	fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), IOError>> {
+		match self.get_mut() {
+			EitherPipe::Local(x) => x.as_mut().poll_shutdown(cx),
+			EitherPipe::Network(x) => x.as_mut().poll_shutdown(cx)
+		}
+	}
+}
+
+
 pub struct Pipes {
-	free_pipes: Mutex<Vec<BiPipe>>,
-	local_bind_addr: String
+	free_pipes: Mutex<Vec<EitherPipe>>,
+	bind_addr: String,
+	is_local: bool
 }
 
 
@@ -454,10 +472,11 @@ impl Sessions {
 
 
 impl Pipes {
-	pub fn new(local_bind_addr: String, cleanup_delay: u32) -> Arc<Self> {
+	pub fn new(bind_addr: String, cleanup_delay: u32, is_local: bool) -> Arc<Self> {
 		let out = Arc::new(Self {
 			free_pipes: Default::default(),
-			local_bind_addr: String::from(MANGLE_DB_SUFFIX) + local_bind_addr.as_str()
+			bind_addr: String::from(MANGLE_DB_SUFFIX) + bind_addr.as_str(),
+			is_local
 		});
 
 		let out_clone = out.clone();
@@ -471,15 +490,21 @@ impl Pipes {
 
 		out
 	}
-	pub fn take_pipe(&self) -> Result<BiPipe, IOError> {
-		if let Some(x) = self.free_pipes.lock().unwrap().pop() {
-			Ok(x)
-		} else {
-			BiPipe::connect(self.local_bind_addr.as_str())
+		pub async fn take_pipe(&self) -> Result<EitherPipe, IOError> {
+			{
+				if let Some(x) = self.free_pipes.lock().unwrap().pop() {
+					return Ok(x)
+				}
+			}
+
+			if self.is_local {
+				EitherPipe::connect_local(self.bind_addr.as_str())
+			} else {
+				EitherPipe::connect_remote(self.bind_addr.as_str()).await
 		}
 	}
 
-	pub fn return_pipe(&self, pipe: BiPipe) {
+	pub fn return_pipe(&self, pipe: EitherPipe) {
 		self.free_pipes.lock().unwrap().push(pipe);
 	}
 

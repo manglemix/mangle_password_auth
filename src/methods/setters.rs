@@ -55,7 +55,7 @@ pub(crate) async fn put_resource(path: PathBuf, data: String, cookies: &CookieJa
 
 
 #[rocket::post("/<path..>", data = "<data>")]
-pub(crate) async fn post_data(path: PathBuf, data: String, cookies: &CookieJar<'_>, globals: &GlobalState) -> (Status, Either<&'static str, (ContentType, Vec<u8>)>) {
+pub(crate) async fn post_data(path: PathBuf, data: Vec<u8>, cookies: &CookieJar<'_>, globals: &GlobalState) -> (Status, Either<&'static str, (ContentType, Vec<u8>)>) {
 	if let Some(session) = check_session_id!(globals.sessions, cookies, either) {
 		if let Some(username) = globals.sessions.get_session_owner(&session) {
 			if !globals.permissions.can_user_write_here(&username, &path) {
@@ -69,18 +69,12 @@ pub(crate) async fn post_data(path: PathBuf, data: String, cookies: &CookieJar<'
 		missing_session!(either)
 	}
 
-	let mut socket = match globals.pipes.take_pipe() {
-		Ok(x) => x,
-		Err(e) => {
-			default_error!(e, "connecting to db");
-			return make_response!(ServerError, Either::Left(DB_CONNECTION))
-		}
-	};
+	let mut socket = take_pipe!(globals, either);
 
 	let path = path.to_str().unwrap();
 	let mut payload = VecDeque::with_capacity(8 + path.len() + data.len());
 	payload.serialize_string(path);
-	payload.serialize_string(data);
+	payload.append(&mut data.into());
 
 	write_socket!(
 		socket,

@@ -58,7 +58,7 @@ macro_rules! read_socket {
 			}
 		}
 
-		let body_size = u32::from_be_bytes([header_and_size[0], header_and_size[1], header_and_size[2], header_and_size[3]]);
+		let body_size = u32::from_be_bytes([header_and_size[1], header_and_size[2], header_and_size[3], header_and_size[4]]);
 		let mut data = vec![0; body_size as usize];
 
 		if body_size > 0 {
@@ -74,6 +74,7 @@ macro_rules! read_socket {
 					return make_response!(ServerError, $conn_err_msg)
 				}
 			}
+
 			match mangle_db_enums::Message::new_response(header_and_size[0], data) {
 				Ok(x) => x,
 				Err(_) => {
@@ -173,7 +174,7 @@ macro_rules! missing_session {
 }
 macro_rules! take_pipe {
     ($globals: expr) => {
-		match $globals.pipes.take_pipe() {
+		match $globals.pipes.take_pipe().await {
 			Ok(x) => x,
 			Err(e) => {
 				default_error!(e, "connecting to db");
@@ -182,7 +183,7 @@ macro_rules! take_pipe {
 		}
 	};
     ($globals: expr, either) => {
-		match $globals.pipes.take_pipe() {
+		match $globals.pipes.take_pipe().await {
 			Ok(x) => x,
 			Err(e) => {
 				default_error!(e, "connecting to db");
