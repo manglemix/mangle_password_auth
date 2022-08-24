@@ -6,7 +6,7 @@ use std::mem::take;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use async_std::task::block_on;
+// use async_std::task::block_on;
 use ed25519_dalek::{PUBLIC_KEY_LENGTH, PublicKey};
 use mangle_rust_utils::NestedMap;
 use simple_serde::{DeserializationError, DeserializationErrorKind, Deserialize, ReadableProfile, Serialize, Serializer};
@@ -49,7 +49,7 @@ impl Deserialize<ReadableProfile> for UserCredentialData {
 				DeserializationErrorKind::MissingField => {
 					let path: PathBuf = data.deserialize_key("key")?;
 					let mut bytes = [0u8; PUBLIC_KEY_LENGTH];
-					block_on(async {
+					block_on(async move {
 						let mut file = unwrap_result_or_default_error!(
 							File::open(path),
 							"opening key file"

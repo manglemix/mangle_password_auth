@@ -15,7 +15,7 @@ pub(crate) async fn directory_tools(root_path: PathBuf, cookies: &CookieJar<'_>,
 		"list" => {
 			let mut username = None;
 			if let Some(session) = check_session_id!(globals.sessions, cookies, either) {
-				username = globals.sessions.get_session_owner(&session).await;
+				username = globals.sessions.get_session_owner(&session);
 				if username.is_none()  {
 					error!("No session owner but session-id was valid!");
 					return make_response!(BUG, either)
@@ -35,7 +35,7 @@ pub(crate) async fn directory_tools(root_path: PathBuf, cookies: &CookieJar<'_>,
 
 			let message = read_socket!(socket, either);
 
-			globals.pipes.return_pipe(socket).await;
+			globals.pipes.return_pipe(socket);
 
 			match message.header {
 				GatewayResponseHeader::Ok => {}
@@ -85,7 +85,7 @@ pub(crate) async fn directory_tools(root_path: PathBuf, cookies: &CookieJar<'_>,
 #[rocket::get("/<path..>")]
 pub(crate) async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>, globals: &GlobalState) -> (Status, Either<&'static str, (ContentType, Vec<u8>)>) {
 	if let Some(session) = check_session_id!(globals.sessions, cookies, either) {
-		if let Some(username) = globals.sessions.get_session_owner(&session).await {
+		if let Some(username) = globals.sessions.get_session_owner(&session) {
 			if !globals.permissions.can_user_read_here(&username, &path) {
 				return make_response!(NotFound, Either::Left(RESOURCE_NOT_FOUND))
 			}
@@ -110,7 +110,7 @@ pub(crate) async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>, glob
 
 	let message = read_socket!(socket, either);
 
-	globals.pipes.return_pipe(socket).await;
+	globals.pipes.return_pipe(socket);
 
 	match message.header {
 		GatewayResponseHeader::Ok => {}

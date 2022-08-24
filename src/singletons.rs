@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use argon2::{Config as ArgonConfig, Error as ArgonError, hash_encoded};
-use async_std::sync::{Mutex, RwLock, RwLockUpgradableReadGuard};
 use ed25519_dalek::{PublicKey, Signature};
 use mangle_db_enums::MANGLE_DB_SUFFIX;
 use mangle_rust_utils::NestedMap;
@@ -15,6 +14,7 @@ use rand::distributions::Alphanumeric;
 use regex::Regex;
 use tokio::spawn;
 use tokio::time::sleep;
+use std::sync::{Mutex, RwLock};
 
 #[cfg(windows)]
 use windows::*;
@@ -207,15 +207,15 @@ impl Logins {
 			let duration = Duration::from_secs(cleanup_delay as u64);
 			loop {
 				sleep(duration).await;
-				out_clone.prune_expired().await;
+				out_clone.prune_expired();
 			}
 		});
 
 		out
 	}
 
-	pub async fn prune_expired(&self) {
-		let mut writer = self.failed_logins.write().await;
+	pub fn prune_expired(&self) {
+		let mut writer = self.failed_logins.write().unwrap();
 		let old_fails = replace(writer.deref_mut(), HashMap::new());
 		for (username, fail) in old_fails {
 			if fail.time.elapsed() < self.lockout_time {
@@ -224,7 +224,7 @@ impl Logins {
 		}
 	}
 
-	pub async fn add_user(&self, username: String, password: String) -> Result<(), UserCreationError> {
+	pub fn add_user(&self, username: String, password: String) -> Result<(), UserCreationError> {
 		if username.len() < self.min_username_len as usize || username.len() > self.max_username_len as usize || !username.chars().all(char::is_alphanumeric) {
 			return Err(UserCreationError::BadUsername)
 		}
@@ -233,13 +233,11 @@ impl Logins {
 				return Err(UserCreationError::BadPassword)
 			}
 		}
-		let reader = self.user_cred_map.upgradable_read().await;
-		if reader.contains_key(&username) {
+		if self.user_cred_map.read().unwrap().contains_key(&username) {
 			return Err(UserCreationError::UsernameInUse)
 		}
-		let mut writer = RwLockUpgradableReadGuard::upgrade(reader).await;
 
-		writer.insert(username, Credential::PasswordHash(
+		self.user_cred_map.write().unwrap().insert(username, Credential::PasswordHash(
 			hash_encoded(
 				password.as_bytes(),
 				thread_rng()
@@ -254,46 +252,42 @@ impl Logins {
 		Ok(())
 	}
 
-	pub async fn try_login_password(&self, username: &String, password: String) -> LoginResult {
-		{
-			let reader = self.failed_logins.read().await;
+	pub fn try_login_password(&self, username: &String, password: String) -> LoginResult {
+		let reader = self.failed_logins.read().unwrap();
 
-			if let Some(fail) = reader.get(username) {
-				if fail.running_count >= self.max_fails {
-					if fail.time.elapsed() <= self.lockout_time {
-						return LoginResult::LockedOut
-					} else {
-						drop(reader);
-						let mut writer = self.failed_logins.write().await;
-						writer.remove(username);
-					}
-				} else if fail.time.elapsed() > self.lockout_time {
-					self.failed_logins.write().await.remove(username);
+		if let Some(fail) = reader.get(username) {
+			if fail.running_count >= self.max_fails {
+				if fail.time.elapsed() <= self.lockout_time {
+					return LoginResult::LockedOut
+				} else {
+					drop(reader);
+					self.failed_logins.write().unwrap().remove(username);
 				}
+			} else if fail.time.elapsed() > self.lockout_time {
+				// The last fail was too long ago
+				self.failed_logins.write().unwrap().remove(username);
 			}
+		} else {
+			drop(reader)
 		}
 
-		let reader = self.user_cred_map.read().await;
-
-		match reader.get(username) {
+		match self.user_cred_map.read().unwrap().get(username) {
 			Some(Credential::PasswordHash(hash)) =>
-				if argon2::verify_encoded(hash, password.as_bytes()).unwrap() {
-					let reader = self.failed_logins.read().await;
+				if argon2::verify_encoded(hash.as_str(), password.as_bytes()).unwrap() {
 
-					if reader.contains_key(username) {
-						drop(reader);
-						self.failed_logins.write().await.remove(username);
+					if self.failed_logins.read().unwrap().contains_key(username) {
+						self.failed_logins.write().unwrap().remove(username);
 					}
 
 					LoginResult::Ok
 				} else {
-					let mut writer = self.failed_logins.write().await;
+					let mut writer = self.failed_logins.write().unwrap();
 
 					if let Some(fail) = writer.get_mut(username) {
 						fail.running_count += 1;
 						fail.time = Instant::now();
 						if fail.running_count == self.max_fails {
-							FAILED_LOGINS.warn(username).await
+							block_on(FAILED_LOGINS.warn(username.clone()));
 						}
 					} else {
 						writer.insert(username.clone(), FailedLoginAttempt {
@@ -309,17 +303,16 @@ impl Logins {
 		}
 	}
 
-	pub async fn try_login_key(&self, username: &String, challenge: String, signature: Signature) -> LoginResult {
-		let reader = self.user_cred_map.read().await;
+	pub fn try_login_key(&self, username: &String, challenge: String, signature: Signature) -> LoginResult {
 
-		match reader.get(username) {
+		match self.user_cred_map.read().unwrap().get(username) {
 			Some(Credential::PasswordHash(_)) => LoginResult::UnexpectedCredentials,
 			Some(Credential::Key(key)) => {
 				if !challenge.starts_with(&self.key_challenge_prefix) {
 					return LoginResult::BadCredentialChallenge
 				}
 
-				let mut used_challenges = self.used_challenges.lock().await;
+				let mut used_challenges = self.used_challenges.lock().unwrap();
 				if used_challenges.contains(&challenge) {
 					LoginResult::UsedChallenge
 				} else if key.verify_strict(challenge.as_bytes(), &signature).is_ok() {
@@ -398,18 +391,18 @@ impl Sessions {
 			let duration = Duration::from_secs(cleanup_delay as u64);
 			loop {
 				sleep(duration).await;
-				out_clone.prune_expired().await;
+				out_clone.prune_expired();
 			}
 		});
 
 		out
 	}
-	pub async fn create_session(&self, username: String) -> Arc<SessionID> {
-		if let Some(x) = self.user_session_map.read().await.get(&username) {
+	pub fn create_session(&self, username: String) -> Arc<SessionID> {
+		if let Some(x) = self.user_session_map.read().unwrap().get(&username) {
 			return x.clone()
 		}
 
-		let mut writer = self.sessions.write().await;
+		let mut writer = self.sessions.write().unwrap();
 		let mut session_id;
 
 		{
@@ -428,17 +421,17 @@ impl Sessions {
 		});
 		drop(writer);
 
-		self.user_session_map.write().await.insert(username.clone(), arc_session_id.clone());
-		self.session_user_map.write().await.insert(arc_session_id.clone(), username);
+		self.user_session_map.write().unwrap().insert(username.clone(), arc_session_id.clone());
+		self.session_user_map.write().unwrap().insert(arc_session_id.clone(), username);
 
 		arc_session_id
 	}
 
-	pub async fn prune_expired(&self) {
-		let mut session_writer = self.sessions.write().await;
+	pub fn prune_expired(&self) {
+		let mut session_writer = self.sessions.write().unwrap();
 		let old_sessions = replace(session_writer.deref_mut(), HashMap::new());
-		let mut user_session_writer = self.user_session_map.write().await;
-		let mut session_user_writer = self.session_user_map.write().await;
+		let mut user_session_writer = self.user_session_map.write().unwrap();
+		let mut session_user_writer = self.session_user_map.write().unwrap();
 
 		for (session_id, session_data) in old_sessions {
 			if session_data.creation_time.elapsed() > self.max_session_duration {
@@ -450,12 +443,12 @@ impl Sessions {
 		}
 	}
 
-	pub async fn is_valid_session(&self, session_id: &SessionID) -> bool {
-		self.sessions.read().await.contains_key(session_id)
+	pub fn is_valid_session(&self, session_id: &SessionID) -> bool {
+		self.sessions.read().unwrap().contains_key(session_id)
 	}
 
-	pub async fn get_session_owner(&self, session_id: &SessionID) -> Option<String> {
-		self.session_user_map.read().await.get(session_id).cloned()
+	pub fn get_session_owner(&self, session_id: &SessionID) -> Option<String> {
+		self.session_user_map.read().unwrap().get(session_id).cloned()
 	}
 }
 
@@ -472,26 +465,26 @@ impl Pipes {
 			let duration = Duration::from_secs(cleanup_delay as u64);
 			loop {
 				sleep(duration).await;
-				out_clone.prune_pipes().await;
+				out_clone.prune_pipes();
 			}
 		});
 
 		out
 	}
-	pub async fn take_pipe(&self) -> Result<BiPipe, IOError> {
-		if let Some(x) = self.free_pipes.lock().await.pop() {
+	pub fn take_pipe(&self) -> Result<BiPipe, IOError> {
+		if let Some(x) = self.free_pipes.lock().unwrap().pop() {
 			Ok(x)
 		} else {
 			BiPipe::connect(self.local_bind_addr.as_str())
 		}
 	}
 
-	pub async fn return_pipe(&self, pipe: BiPipe) {
-		self.free_pipes.lock().await.push(pipe);
+	pub fn return_pipe(&self, pipe: BiPipe) {
+		self.free_pipes.lock().unwrap().push(pipe);
 	}
 
-	pub async fn prune_pipes(&self) {
-		self.free_pipes.lock().await.clear();
+	pub fn prune_pipes(&self) {
+		self.free_pipes.lock().unwrap().clear();
 	}
 }
 

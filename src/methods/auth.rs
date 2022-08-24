@@ -11,9 +11,9 @@ use super::*;
 
 #[rocket::get("/users_with_password?<username>&<password>")]
 pub(crate) async fn get_session_with_password(username: String, password: String, cookies: &CookieJar<'_>, globals: &GlobalState) -> Response {
-	match globals.logins.try_login_password(&username, password).await {
+	match globals.logins.try_login_password(&username, password) {
 		LoginResult::Ok => {
-			let session_id = globals.sessions.create_session(username).await;
+			let session_id = globals.sessions.create_session(username);
 			cookies.add(
 				Cookie::build(SESSION_COOKIE_NAME, session_id.to_string())
 					.expires(OffsetDateTime::from(SystemTime::now().add(globals.sessions.max_session_duration)))
@@ -38,9 +38,9 @@ pub(crate) async fn get_session_with_key(username: String, message: String, sign
 		Ok(x) => x,
 		Err(_) => return make_response!(BadRequest, "Invalid signature")
 	};
-	match globals.logins.try_login_key(&username, message, signature).await {
+	match globals.logins.try_login_key(&username, message, signature) {
 		LoginResult::Ok => {
-			let session_id = globals.sessions.create_session(username).await;
+			let session_id = globals.sessions.create_session(username);
 			cookies.add(
 				Cookie::build(SESSION_COOKIE_NAME, session_id.to_string())
 					.expires(OffsetDateTime::from(SystemTime::now().add(globals.sessions.max_session_duration)))
@@ -65,7 +65,7 @@ pub(crate) async fn make_user(username: String, password: String, cookies: &Cook
 		None => missing_session!()
 	};
 
-	match globals.sessions.get_session_owner(&session_id).await {
+	match globals.sessions.get_session_owner(&session_id) {
 		Some(creator) => if !globals.special_users.can_user_create_user(&creator) {
 			return make_response!(Status::Unauthorized, "You are not authorized to create users")
 		}
@@ -75,7 +75,7 @@ pub(crate) async fn make_user(username: String, password: String, cookies: &Cook
 		}
 	}
 
-	match globals.logins.add_user(username, password).await {
+	match globals.logins.add_user(username, password) {
 		Ok(()) => make_response!(Ok, "User created successfully"),
 		Err(e) => match e {
 			UserCreationError::ArgonError(e) => {

@@ -13,7 +13,7 @@ use super::*;
 #[rocket::put("/<path..>", data = "<data>")]
 pub(crate) async fn put_resource(path: PathBuf, data: String, cookies: &CookieJar<'_>, globals: &GlobalState) -> Response {
 	if let Some(session) = check_session_id!(globals.sessions, cookies) {
-		if let Some(username) = globals.sessions.get_session_owner(&session).await {
+		if let Some(username) = globals.sessions.get_session_owner(&session) {
 			if !globals.permissions.can_user_write_here(&username, &path) {
 				return make_response!(NotFound, RESOURCE_NOT_FOUND)
 			}
@@ -42,7 +42,7 @@ pub(crate) async fn put_resource(path: PathBuf, data: String, cookies: &CookieJa
 
 	let message = read_socket!(socket);
 
-	globals.pipes.return_pipe(socket).await;
+	globals.pipes.return_pipe(socket);
 
 	match message.header {
 		GatewayResponseHeader::Ok => make_response!(Ok, "Resource put successfully"),
@@ -57,7 +57,7 @@ pub(crate) async fn put_resource(path: PathBuf, data: String, cookies: &CookieJa
 #[rocket::post("/<path..>", data = "<data>")]
 pub(crate) async fn post_data(path: PathBuf, data: String, cookies: &CookieJar<'_>, globals: &GlobalState) -> (Status, Either<&'static str, (ContentType, Vec<u8>)>) {
 	if let Some(session) = check_session_id!(globals.sessions, cookies, either) {
-		if let Some(username) = globals.sessions.get_session_owner(&session).await {
+		if let Some(username) = globals.sessions.get_session_owner(&session) {
 			if !globals.permissions.can_user_write_here(&username, &path) {
 				return make_response!(NotFound, Either::Left(RESOURCE_NOT_FOUND))
 			}
@@ -69,7 +69,7 @@ pub(crate) async fn post_data(path: PathBuf, data: String, cookies: &CookieJar<'
 		missing_session!(either)
 	}
 
-	let mut socket = match globals.pipes.take_pipe().await {
+	let mut socket = match globals.pipes.take_pipe() {
 		Ok(x) => x,
 		Err(e) => {
 			default_error!(e, "connecting to db");
@@ -93,7 +93,7 @@ pub(crate) async fn post_data(path: PathBuf, data: String, cookies: &CookieJar<'
 
 	let message = read_socket!(socket, either);
 
-	globals.pipes.return_pipe(socket).await;
+	globals.pipes.return_pipe(socket);
 
 	match message.header {
 		GatewayResponseHeader::Ok => {}

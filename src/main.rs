@@ -6,13 +6,13 @@ extern crate rocket;
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Error as IOError, ErrorKind, Read};
+use std::future::Future;
+use std::io::{Error as IOError, ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use async_std::io::{self, WriteExt};
-use async_std::task::block_on;
+use tokio::io::{AsyncReadExt};
 use mangle_db_config_parse::ask_config_filename;
 use regex::Regex;
 use rocket::fairing::AdHoc;
@@ -40,6 +40,16 @@ define_info!(crate::LOG, export);
 define_warn!(crate::LOG, export);
 
 mod methods;
+
+
+fn block_on<F: Future + Send + 'static>(f: F) -> F::Output
+	where F::Output: Send + 'static
+{
+	std::thread::spawn(move || {
+		tokio::runtime::Runtime::new().unwrap().block_on(f)
+	}).join().unwrap()
+}
+
 
 fn path_buf_to_segments(path: &PathBuf) -> Vec<String> {
 	path.components().map(|x| x.as_os_str().to_str().map(|x| x.to_string())).flatten().collect()
@@ -115,10 +125,9 @@ async fn main() {
 		"parsing permissions file"
 	);
 
-	LOG.open_log_file(configs.log_path).await.expect("Error opening log file");
 	singletons::FAILED_LOGINS.open_log_file(configs.failed_logins_path).await.expect("Error opening failed logins log file");
 
-	let (ready_tx, ready_rx) = async_std::channel::unbounded::<()>();
+	let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
 	select! {
 		// server
@@ -133,7 +142,6 @@ async fn main() {
 				post_data
 			])
 			.attach(AdHoc::on_liftoff("notify_liftoff", |_| Box::pin(async move {
-				warn!("Listener started up!");
 				drop(ready_tx);
 			})))
 			.attach(Compression::fairing())
@@ -149,7 +157,7 @@ async fn main() {
 						configs.min_username_len,
 						configs.max_username_len,
 						configs.cleanup_delay,
-						configs.password_regex.map(|x| { block_on(async { unwrap_result_or_default_error!(Regex::new(x.as_str()), "parsing password regex") }) })
+						configs.password_regex.map(|x| { block_on(async move { unwrap_result_or_default_error!(Regex::new(x.as_str()), "parsing password regex") }) })
 					),
 					sessions: Sessions::new(Duration::from_secs(configs.max_session_duration), configs.cleanup_delay),
 					pipes: Pipes::new(configs.suffix, configs.cleanup_delay),
@@ -178,42 +186,39 @@ async fn main() {
 		}
 		// stdin
 		() = async {
-			let _ = ready_rx.recv().await;	// wait for rocket to launch
-			drop(ready_rx);
-			let stdin = io::stdin();
-			
-			'main: loop {
+			let _ = ready_rx.recv().await;
+			warn!("Listener started up!");
+			LOG.open_log_file(configs.log_path).await.expect("Error opening log file");
+
+			let mut stdin = tokio::io::stdin();
+			let mut stdout = std::io::stdout();
+
+			loop {
 				print!(">>> ");
-				if io::stdout().flush().await.is_err() {
-					continue;
-				}
-				
-				let mut line = String::new();
-				match stdin.read_line(&mut line).await {
-					Ok(_) => {},
-					Err(e) => {
-						error!("error reading stdin: {:?}", e);
-						continue;
+				stdout.flush().unwrap();
+
+				let mut line = vec![0; 1024];
+				match stdin.read(&mut line).await {
+					Ok(n) => line.split_off(n),
+					Err(_) => continue
+				};
+				let line = match String::from_utf8(line) {
+					Ok(x) => x,
+					Err(_) => {
+						println!("The given command was not valid utf8");
+						continue
 					}
-				}
-				
-				// trimming end
-				loop {
-					match line.pop() {
-						Some(char) => if char.is_alphanumeric() {
-							line += String::from(char).as_str();
-							break
-						}
-						None => continue 'main
-					}
-				}
-				
+				};
+
 				// TODO Add more commands
-				match line.as_str() {
-					"exit" => break,
+				match line.trim() {
+					"exit" => {
+						warn!("User exited!");
+						return
+					}
 					_ => {}
 				}
-			};
+			}
 		} => {},
 	}
 	;

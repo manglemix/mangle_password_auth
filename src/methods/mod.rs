@@ -154,7 +154,7 @@ macro_rules! check_session_id {
 				Ok(x) => x,
 				Err(_) => return make_response!(BadRequest, $err_msg1)
 			};
-			if !$session.is_valid_session(&session_id).await {
+			if !$session.is_valid_session(&session_id) {
 				return make_response!(rocket::http::Status::Unauthorized, $err_msg2)
 			}
 			Some(session_id)
@@ -173,7 +173,7 @@ macro_rules! missing_session {
 }
 macro_rules! take_pipe {
     ($globals: expr) => {
-		match $globals.pipes.take_pipe().await {
+		match $globals.pipes.take_pipe() {
 			Ok(x) => x,
 			Err(e) => {
 				default_error!(e, "connecting to db");
@@ -182,7 +182,7 @@ macro_rules! take_pipe {
 		}
 	};
     ($globals: expr, either) => {
-		match $globals.pipes.take_pipe().await {
+		match $globals.pipes.take_pipe() {
 			Ok(x) => x,
 			Err(e) => {
 				default_error!(e, "connecting to db");
