@@ -10,7 +10,6 @@ use std::future::Future;
 use std::io::{Error as IOError, ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::thread::sleep;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt};
@@ -88,7 +87,7 @@ async fn main() {
 		}
 		Err(e) => match e.kind() {
 			ErrorKind::NotFound => {}
-			_ => default_error!(e, "opening used challenges file")
+			_ => { default_error!(e, "opening used challenges file"); }
 		}
 	};
 
@@ -192,7 +191,6 @@ async fn main() {
 			LOG.attach_log_file(configs.log_path, default_format, vec![], true).expect("Error opening log file");
 			let _ = ready_rx.recv().await;
 			warn!("Listener started up!");
-			sleep(Duration::new(0, 100));
 			stderr_handle.pause();
 
 			let mut stdin = tokio::io::stdin();
@@ -230,9 +228,8 @@ async fn main() {
 	;
 
 	stderr_handle.unpause();
-	sleep(Duration::new(0, 100));
 	if user_exited {
-		warn!("User exited!")
+		warn!("User exited!");
 	}
 	warn!("Exit Successful");
 }
