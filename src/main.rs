@@ -10,6 +10,7 @@ use std::future::Future;
 use std::io::{Error as IOError, ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::thread::sleep;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt};
@@ -17,6 +18,7 @@ use mangle_db_config_parse::ask_config_filename;
 use regex::Regex;
 use rocket::fairing::AdHoc;
 use rocket_async_compression::Compression;
+use simple_logger::formatters::default_format;
 use simple_logger::prelude::*;
 use simple_serde::mlist_prelude::MListDeserialize;
 use tokio::select;
@@ -34,7 +36,7 @@ mod configs;
 mod parsing;
 
 
-declare_logger!(pub LOG, EitherFileOrStderr, 0, );
+declare_logger!([pub] LOG);
 define_error!(crate::LOG, trace, export);
 define_info!(crate::LOG, export);
 define_warn!(crate::LOG, export);
@@ -58,11 +60,11 @@ fn path_buf_to_segments(path: &PathBuf) -> Vec<String> {
 
 #[rocket::main]
 async fn main() {
-	LOG.init_stderr().await;
+	let stderr_handle = LOG.attach_stderr(default_format, vec![], true);
 
 	let config_path = ask_config_filename("Mangle Password Auth", "auth_config.toml");
 	info!("Using {} as a config file", config_path);
-	let configs = read_config_file(config_path).await;
+	let configs = read_config_file(config_path);
 
 	let mut users_file = unwrap_result_or_default_error!(
 		File::open(configs.users_path),
@@ -125,10 +127,11 @@ async fn main() {
 		"parsing permissions file"
 	);
 
-	singletons::FAILED_LOGINS.open_log_file(configs.failed_logins_path).await.expect("Error opening failed logins log file");
+	singletons::FAILED_LOGINS.attach_log_file(configs.failed_logins_path, default_format, vec![], true).expect("Error opening failed logins log file");
 
 	let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
+	let mut user_exited = false;
 	select! {
 		// server
 		res = rocket::build()
@@ -186,9 +189,11 @@ async fn main() {
 		}
 		// stdin
 		() = async {
+			LOG.attach_log_file(configs.log_path, default_format, vec![], true).expect("Error opening log file");
 			let _ = ready_rx.recv().await;
 			warn!("Listener started up!");
-			LOG.open_log_file(configs.log_path).await.expect("Error opening log file");
+			sleep(Duration::new(0, 100));
+			stderr_handle.pause();
 
 			let mut stdin = tokio::io::stdin();
 			let mut stdout = std::io::stdout();
@@ -214,7 +219,7 @@ async fn main() {
 				// TODO Add more commands
 				match line.trim() {
 					"exit" => {
-						warn!("User exited!");
+						user_exited = true;
 						return
 					}
 					_ => {}
@@ -224,7 +229,10 @@ async fn main() {
 	}
 	;
 
-	warn!("Exit Successful");
-	LOG.init_stderr().await;
+	stderr_handle.unpause();
+	sleep(Duration::new(0, 100));
+	if user_exited {
+		warn!("User exited!")
+	}
 	warn!("Exit Successful");
 }

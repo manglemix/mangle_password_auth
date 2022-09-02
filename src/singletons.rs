@@ -27,7 +27,7 @@ use tokio::net::windows::named_pipe::{NamedPipeClient as LocalPipe};
 
 use crate::*;
 
-declare_logger!(pub FAILED_LOGINS, File, 0, );
+declare_logger!([pub] FAILED_LOGINS);
 
 pub enum Credential {
 	PasswordHash(String),
@@ -305,7 +305,7 @@ impl Logins {
 						fail.running_count += 1;
 						fail.time = Instant::now();
 						if fail.running_count == self.max_fails {
-							block_on(FAILED_LOGINS.warn(username.clone()));
+							FAILED_LOGINS.warn(username.clone(), None);
 						}
 					} else {
 						writer.insert(username.clone(), FailedLoginAttempt {

@@ -1,4 +1,4 @@
-use tokio::fs::File;
+use std::fs::File;
 // use tokio::io::ReadExt;
 use std::path::Path;
 use simple_serde::{mlist_prelude::*, prelude::*, toml_prelude::*};
@@ -51,14 +51,14 @@ impl Deserialize<ReadableProfile> for Configs {
 }
 
 
-pub async fn read_config_file<T: AsRef<Path>>(path: T) -> Configs {
+pub fn read_config_file<T: AsRef<Path>>(path: T) -> Configs {
 	let mut file = unwrap_result_or_default_error!(
-		File::open(path).await,
+		File::open(path),
 		"opening config file"
 	);
 	let mut data = String::new();
 	unwrap_result_or_default_error!(
-		file.read_to_string(&mut data).await,
+		file.read_to_string(&mut data),
 		"reading config file"
 	);
 	unwrap_result_or_default_error!(
