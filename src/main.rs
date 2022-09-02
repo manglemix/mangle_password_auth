@@ -190,7 +190,7 @@ async fn main() {
 		() = async {
 			LOG.attach_log_file(configs.log_path, default_format, vec![], true).expect("Error opening log file");
 			let _ = ready_rx.recv().await;
-			warn!("Listener started up!");
+			warn!("Listener started up!").wait();
 			stderr_handle.pause();
 
 			let mut stdin = tokio::io::stdin();
