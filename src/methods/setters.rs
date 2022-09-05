@@ -1,3 +1,4 @@
+/// Methods here try to write data to the database
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
@@ -10,6 +11,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::*;
 
+/// Try to overwrite the resource at the given path with a new resource
 #[rocket::put("/<path..>", data = "<data>")]
 pub(crate) async fn put_resource(path: PathBuf, data: String, cookies: &CookieJar<'_>, globals: &GlobalState) -> Response {
 	if let Some(session) = check_session_id!(globals.sessions, cookies) {
@@ -54,6 +56,9 @@ pub(crate) async fn put_resource(path: PathBuf, data: String, cookies: &CookieJa
 }
 
 
+/// Try to send data to the process at the given path
+///
+/// At this version, processes are always python scripts
 #[rocket::post("/<path..>", data = "<data>")]
 pub(crate) async fn post_data(path: PathBuf, data: Vec<u8>, cookies: &CookieJar<'_>, globals: &GlobalState) -> (Status, Either<&'static str, (ContentType, Vec<u8>)>) {
 	if let Some(session) = check_session_id!(globals.sessions, cookies, either) {

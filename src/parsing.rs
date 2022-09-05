@@ -49,20 +49,18 @@ impl Deserialize<ReadableProfile> for UserCredentialData {
 				DeserializationErrorKind::MissingField => {
 					let path: PathBuf = data.deserialize_key("key")?;
 					let mut bytes = [0u8; PUBLIC_KEY_LENGTH];
-					block_on(async move {
-						let mut file = unwrap_result_or_default_error!(
-							File::open(path),
-							"opening key file"
-						);
-						unwrap_result_or_default_error!(
-							file.read_exact(bytes.as_mut_slice()),
-							"reading key file"
-						);
-						Credential::Key(unwrap_result_or_default_error!(
-							PublicKey::from_bytes(bytes.as_slice()),
-							"parsing key file"
-						))
-					})
+					let mut file = unwrap_result_or_default_error!(
+						File::open(path),
+						"opening key file"
+					);
+					unwrap_result_or_default_error!(
+						file.read_exact(bytes.as_mut_slice()),
+						"reading key file"
+					);
+					Credential::Key(unwrap_result_or_default_error!(
+						PublicKey::from_bytes(bytes.as_slice()),
+						"parsing key file"
+					))
 				}
 				_ => return Err(e)
 			}
@@ -168,7 +166,7 @@ impl PermissionsDeser {
 	pub fn get_user_home_parent(&mut self) -> Option<Vec<String>> {
 		self.0.remove("UserHomeParent").map(|mut x| {
 			if x.len() != 1 {
-				block_on(async { error!("UserHomeParent can only have 1 path") });
+				error!("UserHomeParent can only have 1 path");
 				bad_exit!();
 			}
 			let path = x.pop().unwrap();

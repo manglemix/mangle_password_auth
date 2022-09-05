@@ -1,3 +1,6 @@
+/// Methods that involve user authentication
+///
+/// These do not interact with the database
 use std::ops::Add;
 use std::time::SystemTime;
 
@@ -9,6 +12,9 @@ use crate::singletons::{LoginResult, UserCreationError};
 
 use super::*;
 
+/// Try to start a session with a username and password
+///
+/// If the user has already opened one and it has not expired, it will be returned
 #[rocket::get("/users_with_password?<username>&<password>")]
 pub(crate) async fn get_session_with_password(username: String, password: String, cookies: &CookieJar<'_>, globals: &GlobalState) -> Response {
 	match globals.logins.try_login_password(&username, password) {
@@ -32,6 +38,9 @@ pub(crate) async fn get_session_with_password(username: String, password: String
 }
 
 
+/// Try to start a session with a username and signature
+///
+/// If the user has already opened one and it has not expired, it will be returned
 #[rocket::get("/users_with_key?<username>&<message>&<signature>")]
 pub(crate) async fn get_session_with_key(username: String, message: String, signature: String, cookies: &CookieJar<'_>, globals: &GlobalState) -> Response {
 	let signature = match signature.parse() {
@@ -58,6 +67,7 @@ pub(crate) async fn get_session_with_key(username: String, message: String, sign
 }
 
 
+/// Tries to create a new user, granted the creating user has appropriate abilities
 #[rocket::put("/create_user_with_password?<username>&<password>")]
 pub(crate) async fn make_user(username: String, password: String, cookies: &CookieJar<'_>, globals: &GlobalState) -> Response {
 	let session_id = match check_session_id!(globals.sessions, cookies) {

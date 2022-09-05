@@ -116,32 +116,6 @@ macro_rules! make_response {
 		($code, $reason)
 	};
 }
-// macro_rules! parse_header {
-//     ($buffer: expr) => {
-// 		parse_header!($buffer, $crate::methods::BUG_MESSAGE)
-// 	};
-//     ($buffer: expr, either) => {
-// 		parse_header!($buffer, rocket::Either::Left(BUG_MESSAGE))
-// 	};
-//     ($buffer: expr, $err_msg: expr) => {{
-// 		let header = match $buffer.remove(0) {
-// 			Some(x) => x,
-// 			None => {
-// 				use $crate::*;
-// 				error!("Empty response from db");
-// 				return make_response!(ServerError, $err_msg);
-// 			}
-// 		};
-// 		match TryInto::<GatewayResponseHeader>::try_into(header) {
-// 			Ok(x) => x,
-// 			Err(_) => {
-// 				use $crate::*;
-// 				error!("Unrecognised header {header}");
-// 				return make_response!(ServerError, $err_msg);
-// 			}
-// 		}
-// 	}};
-// }
 macro_rules! check_session_id {
     ($session: expr, $cookies: expr) => {
 		check_session_id!($session, $cookies, "The Session-ID is malformed", "The Session-ID is invalid or expired")

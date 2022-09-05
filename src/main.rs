@@ -1,3 +1,6 @@
+/// The user authentication side of mangle db
+///
+/// Mainly uses password authentication
 #![feature(proc_macro_hygiene, decl_macro)]
 
 #[macro_use]
@@ -41,15 +44,6 @@ define_info!(crate::LOG, export);
 define_warn!(crate::LOG, export);
 
 mod methods;
-
-
-fn block_on<F: Future + Send + 'static>(f: F) -> F::Output
-	where F::Output: Send + 'static
-{
-	std::thread::spawn(move || {
-		tokio::runtime::Runtime::new().unwrap().block_on(f)
-	}).join().unwrap()
-}
 
 
 fn path_buf_to_segments(path: &PathBuf) -> Vec<String> {
@@ -159,7 +153,7 @@ async fn main() {
 						configs.min_username_len,
 						configs.max_username_len,
 						configs.cleanup_delay,
-						configs.password_regex.map(|x| { block_on(async move { unwrap_result_or_default_error!(Regex::new(x.as_str()), "parsing password regex") }) })
+						configs.password_regex.map(|x| { unwrap_result_or_default_error!(Regex::new(x.as_str()), "parsing password regex") })
 					),
 					sessions: Sessions::new(Duration::from_secs(configs.max_session_duration), configs.cleanup_delay),
 					pipes: Pipes::new(configs.suffix, configs.cleanup_delay, true),

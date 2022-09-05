@@ -1,3 +1,4 @@
+/// Methods here try to read data from the database
 use std::path::PathBuf;
 
 use mangle_db_enums::{GatewayRequestHeader, GatewayResponseHeader, Message};
@@ -9,10 +10,12 @@ use tokio::io::AsyncWriteExt;
 
 use super::*;
 
+/// Perform actions on directories as a whole
 #[rocket::get("/<root_path..>?<action>")]
 pub(crate) async fn directory_tools(root_path: PathBuf, cookies: &CookieJar<'_>, globals: &GlobalState, action: String) -> (Status, Either<&'static str, (ContentType, Vec<u8>)>) {
 	match action.as_str() {
 		"list" => {
+			// List all files in a directory that a user can read
 			let mut username = None;
 			if let Some(session) = check_session_id!(globals.sessions, cookies, either) {
 				username = globals.sessions.get_session_owner(&session);
@@ -82,6 +85,7 @@ pub(crate) async fn directory_tools(root_path: PathBuf, cookies: &CookieJar<'_>,
 	}
 }
 
+/// Try to read the resource at the given path
 #[rocket::get("/<path..>")]
 pub(crate) async fn borrow_resource(path: PathBuf, cookies: &CookieJar<'_>, globals: &GlobalState) -> (Status, Either<&'static str, (ContentType, Vec<u8>)>) {
 	if let Some(session) = check_session_id!(globals.sessions, cookies, either) {
