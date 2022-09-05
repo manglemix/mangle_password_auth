@@ -1,7 +1,8 @@
+#![feature(proc_macro_hygiene, decl_macro)]
+
 /// The user authentication side of mangle db
 ///
 /// Mainly uses password authentication
-#![feature(proc_macro_hygiene, decl_macro)]
 
 #[macro_use]
 extern crate mangle_rust_utils;
@@ -9,7 +10,6 @@ extern crate rocket;
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::future::Future;
 use std::io::{Error as IOError, ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
