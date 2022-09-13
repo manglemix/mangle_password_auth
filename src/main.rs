@@ -26,7 +26,7 @@ use simple_serde::mlist_prelude::MListDeserialize;
 use tokio::select;
 
 use configs::read_config_file;
-use methods::auth::{get_session_with_key, get_session_with_password, make_user};
+use methods::auth::{get_session_with_key, get_session_with_password, make_user, delete_user};
 use methods::getters::{borrow_resource, directory_tools};
 use methods::setters::{post_data, put_resource};
 use parsing::PermissionsDeser;
@@ -135,7 +135,8 @@ async fn main() {
 				borrow_resource,
 				put_resource,
 				make_user,
-				post_data
+				post_data,
+				delete_user
 			])
 			.attach(AdHoc::on_liftoff("notify_liftoff", |_| Box::pin(async move {
 				drop(ready_tx);
@@ -153,7 +154,8 @@ async fn main() {
 						configs.min_username_len,
 						configs.max_username_len,
 						configs.cleanup_delay,
-						configs.password_regex.map(|x| { unwrap_result_or_default_error!(Regex::new(x.as_str()), "parsing password regex") })
+						unwrap_result_or_default_error!(Regex::new(configs.password_regex.as_str()), "parsing password regex"),
+						configs.user_home_template_path
 					),
 					sessions: Sessions::new(Duration::from_secs(configs.max_session_duration), configs.cleanup_delay),
 					pipes: Pipes::new(configs.suffix, configs.cleanup_delay, true),

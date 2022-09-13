@@ -25,6 +25,7 @@ macro_rules! write_socket {
 		write_socket!($socket, $payload, rocket::Either::Left(DB_CONNECTION))
 	};
     ($socket: expr, $payload: expr, $server_err_msg: expr) => {
+		use tokio::io::AsyncWriteExt;
 		match $socket.write_all($payload.to_bytes().as_slice()).await {
 			Ok(_) => {}
 			Err(e) => {
@@ -43,6 +44,7 @@ macro_rules! read_socket {
 		read_socket!($socket, rocket::Either::Left($crate::methods::DB_CONNECTION), rocket::Either::Left($crate::methods::BUG_MESSAGE))
 	};
     ($socket: expr, $conn_err_msg: expr, $header_err_msg: expr) => {{
+		use tokio::io::AsyncReadExt;
 		let mut header_and_size = [0; 5];
 
 		match $socket.read_exact(header_and_size.as_mut_slice()).await {

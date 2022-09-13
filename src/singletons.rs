@@ -105,7 +105,8 @@ pub struct Logins {
 	salt_len: u8,
 	min_username_len: u8,
 	max_username_len: u8,
-	password_regex: Option<Regex>
+	password_regex: Regex,
+	pub(crate) user_home_template_path: PathBuf
 }
 
 
@@ -236,7 +237,8 @@ impl Logins {
 		min_username_len: u8,
 		max_username_len: u8,
 		cleanup_delay: u32,
-		password_regex: Option<Regex>
+		password_regex: Regex,
+		user_home_template_path: PathBuf
 	) -> Arc<Self> {
 		if max_username_len < min_username_len {
 			panic!("max_username_len is smaller than min_username_len!")
@@ -253,7 +255,8 @@ impl Logins {
 			salt_len,
 			min_username_len,
 			max_username_len,
-			password_regex
+			password_regex,
+			user_home_template_path
 		});
 
 		let out_clone = out.clone();
@@ -286,10 +289,8 @@ impl Logins {
 		if username.len() < self.min_username_len as usize || username.len() > self.max_username_len as usize || !username.chars().all(char::is_alphanumeric) {
 			return Err(UserCreationError::BadUsername)
 		}
-		if let Some(re) = &self.password_regex {
-			if !re.is_match(password.as_str()) {
-				return Err(UserCreationError::BadPassword)
-			}
+		if !self.password_regex.is_match(password.as_str()) {
+			return Err(UserCreationError::BadPassword)
 		}
 		if self.user_cred_map.read().unwrap().contains_key(&username) {
 			return Err(UserCreationError::UsernameInUse)
@@ -308,6 +309,10 @@ impl Logins {
 		));
 
 		Ok(())
+	}
+
+	pub fn delete_user(&self, username: &String) -> bool {
+		self.user_cred_map.write().unwrap().remove(username).is_some()
 	}
 
 	/// Try to login with the given credentials
@@ -364,7 +369,6 @@ impl Logins {
 
 	/// Try to login with the given credentials
 	pub fn try_login_key(&self, username: &String, challenge: String, signature: Signature) -> LoginResult {
-
 		match self.user_cred_map.read().unwrap().get(username) {
 			Some(Credential::PasswordHash(_)) => LoginResult::UnexpectedCredentials,
 			Some(Credential::Key(key)) => {

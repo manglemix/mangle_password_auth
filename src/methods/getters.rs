@@ -5,8 +5,6 @@ use mangle_db_enums::{GatewayRequestHeader, GatewayResponseHeader, Message};
 use rocket::Either;
 use rocket::http::{ContentType, CookieJar};
 use simple_serde::{DeserializationErrorKind, PrimitiveSerializer};
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
 
 use super::*;
 
@@ -42,7 +40,8 @@ pub(crate) async fn directory_tools(root_path: PathBuf, cookies: &CookieJar<'_>,
 
 			match message.header {
 				GatewayResponseHeader::Ok => {}
-				GatewayResponseHeader::InternalError => return make_response!(BUG, either),
+				GatewayResponseHeader::BadPath => todo!(),
+				GatewayResponseHeader::InternalError => todo!(),
 				GatewayResponseHeader::IsDirectoryError => return make_response!(BadRequest, Either::Left("The given path is not a directory")),
 				_ => return make_response!(NotFound, Either::Left(RESOURCE_NOT_FOUND))
 			}

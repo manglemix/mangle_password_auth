@@ -6,8 +6,6 @@ use mangle_db_enums::{GatewayRequestHeader, GatewayResponseHeader, Message};
 use rocket::Either;
 use rocket::http::{ContentType, CookieJar};
 use simple_serde::PrimitiveSerializer;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
 
 use super::*;
 

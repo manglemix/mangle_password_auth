@@ -1,11 +1,14 @@
+use std::collections::VecDeque;
 /// Methods that involve user authentication
 ///
 /// These do not interact with the database
 use std::ops::Add;
 use std::time::SystemTime;
+use mangle_db_enums::{GatewayRequestHeader, GatewayResponseHeader, Message};
 
 use rocket::http::{Cookie, CookieJar};
 use rocket::time::OffsetDateTime;
+use simple_serde::PrimitiveSerializer;
 
 use crate::methods::GlobalState;
 use crate::singletons::{LoginResult, UserCreationError};
@@ -85,9 +88,9 @@ pub(crate) async fn make_user(username: String, password: String, cookies: &Cook
 		}
 	}
 
-	match globals.logins.add_user(username, password) {
-		Ok(()) => make_response!(Ok, "User created successfully"),
-		Err(e) => match e {
+	match globals.logins.add_user(username.clone(), password) {
+		Ok(()) => {}
+		Err(e) => return match e {
 			UserCreationError::ArgonError(e) => {
 				default_error!(e, "generating password hash");
 				make_response!(BUG)
@@ -96,5 +99,88 @@ pub(crate) async fn make_user(username: String, password: String, cookies: &Cook
 			UserCreationError::BadPassword => make_response!(BadRequest, "Password is not strong enough"),
 			UserCreationError::BadUsername => make_response!(BadRequest, "Username is not alphanumeric or too short or too long")
 		}
+	}
+
+	let mut pipe = take_pipe!(globals);
+	let mut data = VecDeque::new();
+
+	data.serialize_string(globals.logins.user_home_template_path.to_str().unwrap());
+	data.serialize_string(username.clone());
+
+	write_socket!(
+		pipe,
+		Message::new_request(
+			GatewayRequestHeader::DuplicateDirectory,
+			data
+		).unwrap()
+	);
+
+	let response = read_socket!(pipe);
+	globals.pipes.return_pipe(pipe);
+
+	match response.header {
+		GatewayResponseHeader::Ok => make_response!(Ok, "User created successfully"),
+		GatewayResponseHeader::BadPath => {
+			error!("Received BadPath error with duplicate_directory");
+			globals.logins.delete_user(&username);
+			make_response!(BUG)
+		}
+		GatewayResponseHeader::BadRequest => {
+			error!("Received BadRequest even though username does not exist: {}", username);
+			globals.logins.delete_user(&username);
+			make_response!(BUG)
+		}
+		_ => unreachable!()
+	}
+}
+
+
+/// Tries to delete the user that is currently logged in
+#[rocket::delete("/delete_my_account")]
+pub(crate) async fn delete_user(cookies: &CookieJar<'_>, globals: &GlobalState) -> Response {
+	let session_id = match check_session_id!(globals.sessions, cookies) {
+		Some(x) => x,
+		None => missing_session!()
+	};
+
+	let username = match globals.sessions.get_session_owner(&session_id) {
+		Some(username) => username,
+		None => {
+			error!("Session-ID was valid but not associated with a user!");
+			return make_response!(BUG)
+		}
+	};
+
+	if !globals.logins.delete_user(&username) {
+		return make_response!(BadRequest, "User does not exist")
+	}
+
+	let mut pipe = take_pipe!(globals);
+	let mut data = VecDeque::new();
+
+	data.serialize_string(globals.logins.user_home_template_path.join(username.clone()).to_str().unwrap());
+
+	write_socket!(
+		pipe,
+		Message::new_request(
+			GatewayRequestHeader::DeleteDirectory,
+			data
+		).unwrap()
+	);
+
+	let response = read_socket!(pipe);
+	globals.pipes.return_pipe(pipe);
+
+	match response.header {
+		GatewayResponseHeader::Ok => make_response!(Ok, "User deleted successfully"),
+		GatewayResponseHeader::BadPath => {
+			error!("Received BadPath error with duplicate_directory");
+			make_response!(BUG)
+		}
+		GatewayResponseHeader::BadRequest => {
+			error!("Received BadRequest even though username does exist: {}", username);
+			make_response!(BUG)
+		}
+		_ => unreachable!()
 	}
 }

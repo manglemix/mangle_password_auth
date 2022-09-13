@@ -20,8 +20,9 @@ pub struct Configs {
 	pub max_username_len: u8,
 	pub cleanup_delay: u32,
 	pub permissions_path: String,
-	pub password_regex: Option<String>,
-	pub failed_logins_path: String
+	pub password_regex: String,
+	pub failed_logins_path: String,
+	pub user_home_template_path: PathBuf
 }
 
 
@@ -43,8 +44,9 @@ impl Deserialize<ReadableProfile> for Configs {
 			max_username_len: data.deserialize_key_or("max_username_len", 16)?,
 			cleanup_delay: data.deserialize_key_or("cleanup_delay", 7200u32)?,
 			permissions_path: data.deserialize_key_or("permissions_path", "permissions.mlist")?,
-			password_regex: data.deserialize_key_opt("password_regex")?,
-			failed_logins_path: data.deserialize_key_or("failed_logins_path", "failed_logins.log")?
+			password_regex: data.deserialize_key_or("password_regex", "^(?=.*?[A-Z])(?=.*?[a-z])(?=.*?[0-9])(?=.*?[#?!@$ %^&*-]).{8,}$")?,
+			failed_logins_path: data.deserialize_key_or("failed_logins_path", "failed_logins.log")?,
+			user_home_template_path: data.deserialize_key_or("user_home_template_path", "users/template")?
 		})
 	}
 }
