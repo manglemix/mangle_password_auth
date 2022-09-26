@@ -105,7 +105,7 @@ pub(crate) async fn make_user(username: String, password: String, cookies: &Cook
 	let mut data = VecDeque::new();
 
 	data.serialize_string(globals.logins.user_home_template_path.to_str().unwrap());
-	data.serialize_string(username.clone());
+	data.serialize_string(format!("users/{}", username.clone()));
 
 	write_socket!(
 		pipe,

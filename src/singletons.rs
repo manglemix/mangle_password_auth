@@ -33,6 +33,7 @@ declare_logger!([pub] FAILED_LOGINS);
 ///
 /// For passwords, it's their hash
 /// For keys, its the public key
+#[derive(Debug)]
 pub enum Credential {
 	PasswordHash(String),
 	Key(PublicKey),
@@ -63,7 +64,7 @@ pub enum LoginResult {
 
 
 /// Special abilities that a user can have
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Privilege {
 	CreateUser
 }

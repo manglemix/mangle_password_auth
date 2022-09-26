@@ -35,6 +35,7 @@ impl Deserialize<ReadableProfile> for Privilege {
 }
 
 
+#[derive(Debug)]
 pub struct UserCredentialData {
 	pub cred: Credential,
 	pub privileges: HashSet<Privilege>
