@@ -3,12 +3,3 @@
 
 .idea/
 
-errors.log
-
-users
-
-auth_config.toml
-
-permissions.mlist
-
-failed_logins.log
